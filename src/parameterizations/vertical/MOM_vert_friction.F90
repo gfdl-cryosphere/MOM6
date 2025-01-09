@@ -124,9 +124,9 @@ type, public :: vertvisc_CS ; private
                             !! layers based solely on harmonic mean thicknesses
                             !! for the purpose of determining the extent to which
                             !! the thicknesses used in the viscosities are upwinded [nondim].
-  logical :: shelf_visc     !< If true, the viscous coupling between layers
+  logical :: shelf_visc_grnd  !< If true, the viscous coupling between layers
                             !! is increased near the grounding lines.
-  real    :: zscale_shelf_visc !< A vertical length scale used to set the viscous layer coupling
+  real    :: zscale_shelf_visc_grnd !< A vertical length scale used to set the viscous layer coupling
                             !! near ice shelf grounding lines. [Z ~> m]
   logical :: direct_stress  !< If true, the wind stress is distributed over the topmost Hmix_stress
                             !! of fluid, and an added mixed layer viscosity or a physically based
@@ -1422,9 +1422,6 @@ subroutine vertvisc_coef(u, v, h, dz, forces, visc, tv, dt, G, GV, US, CS, OBC, 
                   ! still within the boundary layer, as determined by the sum
                   ! of the harmonic mean thicknesses [nondim].
 
-  real :: hvel_tot, frac_shelf, kv_shelf_visc_fcn  ! Temporary variables used to couple layers
-                                                   ! near grounding lines
-
   logical, dimension(SZIB_(G)) :: do_i, do_i_shelf
   logical :: do_any_shelf
   integer, dimension(SZIB_(G)) :: &
@@ -2218,7 +2215,7 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
 
     !! Use an exponentially increasing function to increase the vertical coupling
     !! near grounding lines.
-    if (CS%shelf_visc) then
+    if (CS%shelf_visc_grnd) then
        do i=Is,ie
          hvel_tot=0.0
          if (do_i(I)) then
@@ -2231,7 +2228,7 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
                do K=1,nz
                  hvel_tot=hvel_tot+hvel(I,K)
                enddo
-               kv_shelf_visc_fcn = exp(hvel_tot/CS%zscale_shelf_visc)
+               kv_shelf_visc_fcn = exp(hvel_tot/CS%zscale_shelf_visc_grnd)
                do K=1,nz
                  a_cpl(I,K) = a_cpl(i,K) + kv_shelf_visc_fcn * kv_TBL(i)
                enddo
@@ -2768,10 +2765,10 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
                  "the purpose of determining the extent to which the "//&
                  "thicknesses used in the viscosities are upwinded.", &
                  default=0.0, units="nondim")
-  call get_param(param_file, mdl, "SHELF_VISC", CS%shelf_visc, &
+  call get_param(param_file, mdl, "SHELF_VISC_GRND", CS%shelf_visc_grnd, &
                  "If true, use a modified viscosity throughout the column near the  "//&
                  "grounding lines of ice shelves.", default=.false.)
-  call get_param(param_file, mdl, "SHELF_VISC_SCALE", CS%zscale_shelf_visc, &
+  call get_param(param_file, mdl, "SHELF_VISC_GRND_SCALE", CS%zscale_shelf_visc_grnd, &
                  "A vertical length scale for exponentially increasing the  "//&
                  "viscosity in ice shelf cavities.  ", &
                  default=0.0, units="m")
