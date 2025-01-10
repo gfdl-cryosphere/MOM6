@@ -124,6 +124,10 @@ type, public :: vertvisc_CS ; private
                             !! layers based solely on harmonic mean thicknesses
                             !! for the purpose of determining the extent to which
                             !! the thicknesses used in the viscosities are upwinded [nondim].
+  logical :: shelf_visc_grnd  !< If true, the viscous coupling between layers
+                            !! is increased near the grounding lines.
+  real    :: zscale_shelf_visc_grnd !< A vertical length scale used to set the viscous layer coupling
+                            !! near ice shelf grounding lines. [Z ~> m]
   logical :: direct_stress  !< If true, the wind stress is distributed over the topmost Hmix_stress
                             !! of fluid, and an added mixed layer viscosity or a physically based
                             !! boundary layer turbulence parameterization is not needed for stability.
@@ -1417,12 +1421,15 @@ subroutine vertvisc_coef(u, v, h, dz, forces, visc, tv, dt, G, GV, US, CS, OBC, 
   real :: I_valBL ! The inverse of a scaling factor determining when water is
                   ! still within the boundary layer, as determined by the sum
                   ! of the harmonic mean thicknesses [nondim].
+
   logical, dimension(SZIB_(G)) :: do_i, do_i_shelf
   logical :: do_any_shelf
   integer, dimension(SZIB_(G)) :: &
     zi_dir   !  A trinary logical array indicating which thicknesses to use for
              !  finding z_clear.
   integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+
+
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB ; nz = GV%ke
 
@@ -1625,7 +1632,7 @@ subroutine vertvisc_coef(u, v, h, dz, forces, visc, tv, dt, G, GV, US, CS, OBC, 
         endif
         call find_coupling_coef(a_shelf, dz_vel_shelf, do_i_shelf, dz_harm, bbl_thick, &
                                 kv_bbl, z_i, h_ml, dt, j, G, GV, US, CS, visc, Ustar_2d, tv, &
-                                work_on_u=.true., OBC=OBC, shelf=.true.)
+                                work_on_u=.true., OBC=OBC, shelf=.true., forces=forces)
         do I=Isq,Ieq ; if (do_i_shelf(I)) CS%a1_shelf_u(I,j) = a_shelf(I,1) ; enddo
       endif
     endif
@@ -1923,7 +1930,7 @@ end subroutine vertvisc_coef
 !! If BOTTOMDRAGLAW is defined, the minimum of Hbbl and half the adjacent
 !! layer thicknesses are used to calculate a_cpl near the bottom.
 subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i, h_ml, &
-                              dt, j, G, GV, US, CS, visc, Ustar_2d, tv, work_on_u, OBC, shelf)
+                              dt, j, G, GV, US, CS, visc, Ustar_2d, tv, work_on_u, OBC, shelf, forces)
   type(ocean_grid_type),     intent(in)  :: G  !< Ocean grid structure
   type(verticalGrid_type),   intent(in)  :: GV !< Ocean vertical grid structure
   type(unit_scale_type),     intent(in)  :: US !< A dimensional unit scaling type
@@ -1960,7 +1967,7 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
   type(ocean_OBC_type),      pointer     :: OBC   !< Open boundary condition structure
   logical,         optional, intent(in)  :: shelf !< If present and true, use a surface boundary
                                                   !! condition appropriate for an ice shelf.
-
+  type(mech_forcing), optional, intent(in) :: forces !< A structure with the driving mechanical forces
   ! Local variables
 
   real, dimension(SZIB_(G)) :: &
@@ -1996,6 +2003,10 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
   real :: botfn   ! A function that is 1 at the bottom and small far from it [nondim]
   real :: topfn   ! A function that is 1 at the top and small far from it [nondim]
   real :: kv_top  ! A viscosity associated with the top boundary layer [H Z T-1 ~> m2 s-1 or Pa s]
+
+  real :: hvel_tot, frac_shelf, kv_shelf_visc_fcn  ! Temporary variables used to couple layers
+                                                   ! near grounding lines
+
   logical :: do_shelf, do_OBCs, can_exit
   integer :: i, k, is, ie, max_nk
   integer :: nz
@@ -2199,7 +2210,32 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
 
       kv_top = topfn * kv_TBL(i)
       a_cpl(i,K) = a_cpl(i,K) + kv_top / (h_shear + I_amax*kv_top)
+
     endif ; enddo ; enddo
+
+    !! Use an exponentially increasing function to increase the vertical coupling
+    !! near grounding lines.
+    if (CS%shelf_visc_grnd) then
+       do i=Is,ie
+         hvel_tot=0.0
+         if (do_i(I)) then
+            if (work_on_u) then
+              frac_shelf = forces%frac_shelf_u(I,j)
+            else
+              frac_shelf = forces%frac_shelf_v(i,J)
+            endif
+            if (frac_shelf>0.0) then
+               do K=1,nz
+                 hvel_tot=hvel_tot+hvel(I,K)
+               enddo
+               kv_shelf_visc_fcn = exp(-1.0*hvel_tot/CS%zscale_shelf_visc_grnd)
+               do K=1,nz
+                 a_cpl(I,K) = a_cpl(i,K) + kv_shelf_visc_fcn * kv_TBL(i)
+               enddo
+            endif
+         endif
+       enddo
+    endif
 
   elseif (CS%dynamic_viscous_ML .or. (GV%nkml>0) .or. CS%fixed_LOTW_ML .or. CS%apply_LOTW_floor) then
 
@@ -2729,6 +2765,14 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
                  "the purpose of determining the extent to which the "//&
                  "thicknesses used in the viscosities are upwinded.", &
                  default=0.0, units="nondim")
+  call get_param(param_file, mdl, "SHELF_VISC_GRND", CS%shelf_visc_grnd, &
+                 "If true, use a modified viscosity throughout the column near the  "//&
+                 "grounding lines of ice shelves.", default=.false.)
+  call get_param(param_file, mdl, "SHELF_VISC_GRND_SCALE", CS%zscale_shelf_visc_grnd, &
+                 "A vertical length scale for exponentially increasing the  "//&
+                 "viscosity in ice shelf cavities.  ", &
+                 default=0.0, units="m")
+
   call get_param(param_file, mdl, "DEBUG", CS%debug, default=.false.)
 
   if (GV%nkml < 1) then
