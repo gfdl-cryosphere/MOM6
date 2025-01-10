@@ -2228,7 +2228,7 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
                do K=1,nz
                  hvel_tot=hvel_tot+hvel(I,K)
                enddo
-               kv_shelf_visc_fcn = exp(hvel_tot/CS%zscale_shelf_visc_grnd)
+               kv_shelf_visc_fcn = exp(-1.0*hvel_tot/CS%zscale_shelf_visc_grnd)
                do K=1,nz
                  a_cpl(I,K) = a_cpl(i,K) + kv_shelf_visc_fcn * kv_TBL(i)
                enddo
