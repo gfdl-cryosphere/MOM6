@@ -2215,7 +2215,7 @@ subroutine find_coupling_coef(a_cpl, hvel, do_i, h_harm, bbl_thick, kv_bbl, z_i,
 
     !! Use an exponentially increasing function to increase the vertical coupling
     !! near grounding lines.
-    if (CS%shelf_visc_grnd) then
+    if (CS%shelf_visc_grnd .and. associated(forces%frac_shelf_u)) then
        do i=Is,ie
          hvel_tot=0.0
          if (do_i(I)) then

@@ -1039,6 +1039,10 @@ subroutine add_shelf_forces(Ocn_grid, US, CS, forces_in, do_shelf_area, external
 
   if (find_area) then
     ! The frac_shelf is set over the widest possible area. Could it be smaller?
+    if (.not. associated(forces%frac_shelf_u)) then
+      allocate(forces%frac_shelf_u(isd:G%iedB,jsd:jed),source=0.0)
+      allocate(forces%frac_shelf_v(isd:ied,jsd:G%jedB),source=0.0)
+    endif
     do j=jsd,jed ; do I=isd,ied-1
       forces%frac_shelf_u(I,j) = 0.0
       if ((G%areaT(i,j) + G%areaT(i+1,j) > 0.0)) & ! .and. (G%areaCu(I,j) > 0.0)) &

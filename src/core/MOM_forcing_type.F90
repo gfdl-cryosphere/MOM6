@@ -3408,8 +3408,8 @@ subroutine allocate_mech_forcing_by_group(G, forces, stress, ustar, shelf, &
 
   call myAlloc(forces%rigidity_ice_u,IsdB,IedB,jsd,jed, shelf)
   call myAlloc(forces%rigidity_ice_v,isd,ied,JsdB,JedB, shelf)
-  call myAlloc(forces%frac_shelf_u,IsdB,IedB,jsd,jed, shelf)
-  call myAlloc(forces%frac_shelf_v,isd,ied,JsdB,JedB, shelf)
+  !call myAlloc(forces%frac_shelf_u,IsdB,IedB,jsd,jed, shelf)
+  !call myAlloc(forces%frac_shelf_v,isd,ied,JsdB,JedB, shelf)
 
   !These fields should only on allocated when iceberg area is being passed through the coupler.
   call myAlloc(forces%area_berg,isd,ied,jsd,jed, iceberg)
