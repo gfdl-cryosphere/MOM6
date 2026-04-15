@@ -1512,8 +1512,12 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   integer :: Isdq, Iedq, Jsdq, Jedq, isd, ied, jsd, jed
   integer :: Iscq, Iecq, Jscq, Jecq, isc, iec, jsc, jec
   real    :: err_max, err_tempu, err_tempv, err_init ! Errors in [R L3 Z T-2 ~> kg m s-2] or [L T-1 ~> m s-1]
-  real    :: ew_resid      = 0.0  ! L2 norm of stress residual ||A(u)u - tau|| for Eisenstat-Walker [kg m s-2]
-  real    :: ew_prev_resid = 0.0  ! Previous ew_resid; 0.0 flags first Newton call [kg m s-2]
+  real    :: ew_resid       = 0.0  ! L2 norm of stress residual ||A(u)u - tau|| for Eisenstat-Walker [kg m s-2]
+  real    :: ew_prev_resid  = 0.0  ! Previous ew_resid; 0.0 flags first Newton call [kg m s-2]
+  real    :: ew_resid_first = 0.0  ! First Newton ew_resid for Chacon 2006 oversolving safeguard [kg m s-2]
+  real    :: ew_eta         = 0.0  ! Current EW inner tolerance [nondim]
+  real    :: ew_eta_prev    = 0.0  ! Previous EW inner tolerance for Chacon 2006 sharp-decrease safeguard [nondim]
+  real    :: ew_stol                ! Temporary safeguard tolerance [nondim]
   real    :: max_vel  ! The maximum velocity magnitude [L T-1 ~> m s-1]
   real    :: tempu, tempv   ! Temporary variables with velocity magnitudes [L T-1 ~> m s-1]
   real    :: Norm, PrevNorm ! Velocities used to assess convergence [L T-1 ~> m s-1]
@@ -1628,7 +1632,9 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
 
   u_last(:,:) = u_shlf(:,:) ; v_last(:,:) = v_shlf(:,:)
   CS%cg_tol_newton = CS%cg_tolerance
-  ew_prev_resid = 0.0
+  ew_prev_resid  = 0.0
+  ew_resid_first = 0.0
+  ew_eta_prev    = CS%cg_tolerance
 
   !! begin loop
 
@@ -1744,9 +1750,20 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
         ew_resid = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
           unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
         if (ew_prev_resid == 0.0) then
-          ew_prev_resid = ew_resid  ! first Newton iteration: seed; use standard cg_tolerance this step
+          ! First Newton iteration: seed residuals; use standard cg_tolerance this step
+          ew_prev_resid  = ew_resid
+          ew_resid_first = ew_resid
         else
-          CS%cg_tol_newton = min(CS%cg_tolerance, CS%ew_gamma * (ew_resid / ew_prev_resid)**CS%ew_alpha)
+          ! Eisenstat-Walker Choice II base formula
+          ew_eta = CS%ew_gamma * (ew_resid / ew_prev_resid)**CS%ew_alpha
+          ! Chacon 2006 safeguard 1: avoid sharp decrease of eta
+          ew_stol = CS%ew_gamma * ew_eta_prev**CS%ew_alpha
+          ew_eta  = min(CS%cg_tolerance, max(ew_eta, ew_stol))
+          ! Chacon 2006 safeguard 2: avoid oversolving
+          ew_stol = CS%ew_gamma * ew_resid_first * ew_eta / ew_resid
+          ew_eta  = min(CS%cg_tolerance, max(ew_eta, ew_stol))
+          CS%cg_tol_newton = ew_eta
+          ew_eta_prev   = ew_eta
           ew_prev_resid = ew_resid
           write(mesg,*) "ice_shelf_solve_outer: New inner tolerance = ", CS%cg_tol_newton
           call MOM_mesg(mesg, 7)
