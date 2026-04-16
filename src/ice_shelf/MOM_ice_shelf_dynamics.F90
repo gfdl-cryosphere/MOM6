@@ -3127,6 +3127,8 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
   real, dimension(2,2),   intent(out) :: Vcontr !< Nodal v-contributions with friction applied [R L3 Z T-2 ~> kg m s-2]
 
   real, dimension(SIZE(Phisub,3),SIZE(Phisub,3),2,2) :: Ucontr_sub, Vcontr_sub
+  real, dimension(2,2,2,2) :: U_qp_nd, V_qp_nd  ! Per-qp nodal contributions (qx,qy,m,n)
+                                                ! accumulated then pair-summed for rotation invariance
   real :: hloc          ! Local sub-cell ice thickness [Z ~> m]
   real :: u_curr_loc    ! Frozen u^k interpolated to sub-qp [L T-1 ~> m s-1]
   real :: v_curr_loc    ! Frozen v^k interpolated to sub-qp [L T-1 ~> m s-1]
@@ -3145,48 +3147,57 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
   integer :: nsub, i, j, qx, qy, m, n
 
   nsub    = size(Phisub, 3)
-  subarea = 1.0 / (nsub**2)
+  subarea = 1.0 / real(nsub)**2
 
   coef_prefactor = CS%coef_prefactor(i_elem,j_elem)
   min_trac_area  = CS%min_basal_traction * G%areaT(i_elem,j_elem)
   eps_vel2 = CS%eps_glen_min**2 * ((G%dxT(i_elem,j_elem)**2) + (G%dyT(i_elem,j_elem)**2))
 
-  Ucontr_sub(:,:,:,:) = 0.0
-  Vcontr_sub(:,:,:,:) = 0.0
+  Ucontr_sub(:,:,:,:) = 0.0 ; Vcontr_sub(:,:,:,:) = 0.0
 
-  do j=1,nsub ; do i=1,nsub ; do qy=1,2 ; do qx=1,2
-    hloc = ((Phisub(qx,qy,i,j,1,1)*H(1,1)) + (Phisub(qx,qy,i,j,2,2)*H(2,2))) + &
-           ((Phisub(qx,qy,i,j,1,2)*H(1,2)) + (Phisub(qx,qy,i,j,2,1)*H(2,1)))
-    if (dens_ratio * hloc - bathyT > 0) then  ! grounded sub-qp
-      u_curr_loc  = (((Phisub(qx,qy,i,j,1,1)*U_curr(1,1))  + (Phisub(qx,qy,i,j,2,2)*U_curr(2,2)))  + &
-                     ((Phisub(qx,qy,i,j,1,2)*U_curr(1,2))  + (Phisub(qx,qy,i,j,2,1)*U_curr(2,1))))
-      v_curr_loc  = (((Phisub(qx,qy,i,j,1,1)*V_curr(1,1))  + (Phisub(qx,qy,i,j,2,2)*V_curr(2,2)))  + &
-                     ((Phisub(qx,qy,i,j,1,2)*V_curr(1,2))  + (Phisub(qx,qy,i,j,2,1)*V_curr(2,1))))
-      u_delta_loc = (((Phisub(qx,qy,i,j,1,1)*U_delta(1,1)) + (Phisub(qx,qy,i,j,2,2)*U_delta(2,2))) + &
-                     ((Phisub(qx,qy,i,j,1,2)*U_delta(1,2)) + (Phisub(qx,qy,i,j,2,1)*U_delta(2,1))))
-      v_delta_loc = (((Phisub(qx,qy,i,j,1,1)*V_delta(1,1)) + (Phisub(qx,qy,i,j,2,2)*V_delta(2,2))) + &
-                     ((Phisub(qx,qy,i,j,1,2)*V_delta(1,2)) + (Phisub(qx,qy,i,j,2,1)*V_delta(2,1))))
+  do j=1,nsub ; do i=1,nsub
+    U_qp_nd(:,:,:,:) = 0.0 ; V_qp_nd(:,:,:,:) = 0.0
+    do qy=1,2 ; do qx=1,2
+      hloc = ((Phisub(qx,qy,i,j,1,1)*H(1,1)) + (Phisub(qx,qy,i,j,2,2)*H(2,2))) + &
+             ((Phisub(qx,qy,i,j,1,2)*H(1,2)) + (Phisub(qx,qy,i,j,2,1)*H(2,1)))
+      if (dens_ratio * hloc - bathyT > 0) then  ! grounded sub-qp
+        u_curr_loc  = (((Phisub(qx,qy,i,j,1,1)*U_curr(1,1))  + (Phisub(qx,qy,i,j,2,2)*U_curr(2,2)))  + &
+                       ((Phisub(qx,qy,i,j,1,2)*U_curr(1,2))  + (Phisub(qx,qy,i,j,2,1)*U_curr(2,1))))
+        v_curr_loc  = (((Phisub(qx,qy,i,j,1,1)*V_curr(1,1))  + (Phisub(qx,qy,i,j,2,2)*V_curr(2,2)))  + &
+                       ((Phisub(qx,qy,i,j,1,2)*V_curr(1,2))  + (Phisub(qx,qy,i,j,2,1)*V_curr(2,1))))
+        u_delta_loc = (((Phisub(qx,qy,i,j,1,1)*U_delta(1,1)) + (Phisub(qx,qy,i,j,2,2)*U_delta(2,2))) + &
+                       ((Phisub(qx,qy,i,j,1,2)*U_delta(1,2)) + (Phisub(qx,qy,i,j,2,1)*U_delta(2,1))))
+        v_delta_loc = (((Phisub(qx,qy,i,j,1,1)*V_delta(1,1)) + (Phisub(qx,qy,i,j,2,2)*V_delta(2,2))) + &
+                       ((Phisub(qx,qy,i,j,1,2)*V_delta(1,2)) + (Phisub(qx,qy,i,j,2,1)*V_delta(2,1))))
 
-      unorm2_loc = (u_curr_loc**2 + v_curr_loc**2) + eps_vel2
-      call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
-          CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, use_newton, &
-          basal_coef_loc, drag_newt_loc)
-      inner_dot_loc = (u_curr_loc * u_delta_loc) + (v_curr_loc * v_delta_loc)
+        unorm2_loc = (u_curr_loc**2 + v_curr_loc**2) + eps_vel2
+        call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
+            CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, use_newton, &
+            basal_coef_loc, drag_newt_loc)
+        inner_dot_loc = (u_curr_loc * u_delta_loc) + (v_curr_loc * v_delta_loc)
 
-      do n=1,2 ; do m=1,2
-        phi_mn  = Phisub(qx,qy,i,j,m,n)
-        contrib = (subarea * 0.25) * phi_mn
-        ! Picard: friction matrix applied to search direction δu
-        Ucontr_sub(i,j,m,n) = Ucontr_sub(i,j,m,n) + (contrib * (basal_coef_loc * u_delta_loc))
-        Vcontr_sub(i,j,m,n) = Vcontr_sub(i,j,m,n) + (contrib * (basal_coef_loc * v_delta_loc))
-        ! Newton: Jacobian d(tau_b_i)/d(u_j) = basal_coef*I + drag_newt*u^k_i*u^k_j
-        if (use_newton) then
-          Ucontr_sub(i,j,m,n) = Ucontr_sub(i,j,m,n) + (contrib * (drag_newt_loc * u_curr_loc * inner_dot_loc))
-          Vcontr_sub(i,j,m,n) = Vcontr_sub(i,j,m,n) + (contrib * (drag_newt_loc * v_curr_loc * inner_dot_loc))
-        endif
-      enddo ; enddo
-    endif
-  enddo ; enddo ; enddo ; enddo
+        do n=1,2 ; do m=1,2
+          phi_mn  = Phisub(qx,qy,i,j,m,n)
+          contrib = (subarea * 0.25) * phi_mn
+          ! Picard: friction matrix applied to search direction δu
+          U_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc * u_delta_loc)
+          V_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc * v_delta_loc)
+          ! Newton: Jacobian d(tau_b_i)/d(u_j) = basal_coef*I + drag_newt*u^k_i*u^k_j
+          if (use_newton) then
+            U_qp_nd(qx,qy,m,n) = U_qp_nd(qx,qy,m,n) + (contrib * (drag_newt_loc * u_curr_loc * inner_dot_loc))
+            V_qp_nd(qx,qy,m,n) = V_qp_nd(qx,qy,m,n) + (contrib * (drag_newt_loc * v_curr_loc * inner_dot_loc))
+          endif
+        enddo ; enddo
+      endif
+    enddo ; enddo
+
+    do n=1,2 ; do m=1,2
+      Ucontr_sub(i,j,m,n) = (U_qp_nd(1,1,m,n) + U_qp_nd(2,2,m,n)) + &
+                            (U_qp_nd(1,2,m,n) + U_qp_nd(2,1,m,n))
+      Vcontr_sub(i,j,m,n) = (V_qp_nd(1,1,m,n) + V_qp_nd(2,2,m,n)) + &
+                            (V_qp_nd(1,2,m,n) + V_qp_nd(2,1,m,n))
+    enddo ; enddo
+  enddo ; enddo
 
   do n=1,2 ; do m=1,2
     call sum_square_matrix(Ucontr(m,n), Ucontr_sub(:,:,m,n), nsub)
@@ -3542,6 +3553,8 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
   real, dimension(2,2),   intent(out) :: v_diag !< Nodal v-diagonal entries [R L2 Z T-1 ~> kg s-1]
 
   real, dimension(SIZE(Phisub,3),SIZE(Phisub,3),2,2) :: u_diag_sub, v_diag_sub
+  real, dimension(2,2,2,2) :: u_diag_qp_nd, v_diag_qp_nd  ! Per-qp nodal diagonal entries (qx,qy,m,n),
+                                                         ! pair-summed for rotation invariance
   real :: hloc           ! Local sub-cell ice thickness [Z ~> m]
   real :: u_curr_loc     ! Frozen u^k interpolated to sub-qp [L T-1 ~> m s-1]
   real :: v_curr_loc     ! Frozen v^k interpolated to sub-qp [L T-1 ~> m s-1]
@@ -3557,43 +3570,53 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
   integer :: nsub, i, j, qx, qy, m, n
 
   nsub    = size(Phisub, 3)
-  subarea = 1.0 / (nsub**2)
+  subarea = 1.0 / real(nsub)**2
 
   coef_prefactor = CS%coef_prefactor(i_elem,j_elem)
   min_trac_area  = CS%min_basal_traction * G%areaT(i_elem,j_elem)
   eps_vel2 = CS%eps_glen_min**2 * ((G%dxT(i_elem,j_elem)**2) + (G%dyT(i_elem,j_elem)**2))
 
-  u_diag_sub(:,:,:,:) = 0.0
-  v_diag_sub(:,:,:,:) = 0.0
+  u_diag_sub(:,:,:,:) = 0.0 ; v_diag_sub(:,:,:,:) = 0.0
 
-  do j=1,nsub ; do i=1,nsub ; do qy=1,2 ; do qx=1,2
-    hloc = ((Phisub(qx,qy,i,j,1,1)*H_node(1,1)) + (Phisub(qx,qy,i,j,2,2)*H_node(2,2))) + &
-           ((Phisub(qx,qy,i,j,1,2)*H_node(1,2)) + (Phisub(qx,qy,i,j,2,1)*H_node(2,1)))
-    if (dens_ratio * hloc - bathyT > 0) then  ! grounded sub-qp
-      u_curr_loc = (((Phisub(qx,qy,i,j,1,1)*U_curr(1,1)) + (Phisub(qx,qy,i,j,2,2)*U_curr(2,2))) + &
-                    ((Phisub(qx,qy,i,j,1,2)*U_curr(1,2)) + (Phisub(qx,qy,i,j,2,1)*U_curr(2,1))))
-      v_curr_loc = (((Phisub(qx,qy,i,j,1,1)*V_curr(1,1)) + (Phisub(qx,qy,i,j,2,2)*V_curr(2,2))) + &
-                    ((Phisub(qx,qy,i,j,1,2)*V_curr(1,2)) + (Phisub(qx,qy,i,j,2,1)*V_curr(2,1))))
+  do j=1,nsub ; do i=1,nsub
+    ! Zero the 4-qp per-node buffer so ungrounded qp contribute exactly 0.
+    u_diag_qp_nd(:,:,:,:) = 0.0 ; v_diag_qp_nd(:,:,:,:) = 0.0
+    do qy=1,2 ; do qx=1,2
+      hloc = ((Phisub(qx,qy,i,j,1,1)*H_node(1,1)) + (Phisub(qx,qy,i,j,2,2)*H_node(2,2))) + &
+             ((Phisub(qx,qy,i,j,1,2)*H_node(1,2)) + (Phisub(qx,qy,i,j,2,1)*H_node(2,1)))
+      if (dens_ratio * hloc - bathyT > 0) then  ! grounded sub-qp
+        u_curr_loc = (((Phisub(qx,qy,i,j,1,1)*U_curr(1,1)) + (Phisub(qx,qy,i,j,2,2)*U_curr(2,2))) + &
+                      ((Phisub(qx,qy,i,j,1,2)*U_curr(1,2)) + (Phisub(qx,qy,i,j,2,1)*U_curr(2,1))))
+        v_curr_loc = (((Phisub(qx,qy,i,j,1,1)*V_curr(1,1)) + (Phisub(qx,qy,i,j,2,2)*V_curr(2,2))) + &
+                      ((Phisub(qx,qy,i,j,1,2)*V_curr(1,2)) + (Phisub(qx,qy,i,j,2,1)*V_curr(2,1))))
 
-      unorm2_loc = (u_curr_loc**2 + v_curr_loc**2) + eps_vel2
-      call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
-          CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, .true., &
-          basal_coef_loc, drag_newt_loc)
+        unorm2_loc = (u_curr_loc**2 + v_curr_loc**2) + eps_vel2
+        call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
+            CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, .true., &
+            basal_coef_loc, drag_newt_loc)
 
-      do n=1,2 ; do m=1,2
-        phi_mn_sq = Phisub(qx,qy,i,j,m,n)**2
-        contrib   = (subarea * 0.25) * phi_mn_sq
-        ! Picard diagonal + Newton diagonal (u_curr^2 for u-block, v_curr^2 for v-block)
-        if (CS%doing_newton) then
-          u_diag_sub(i,j,m,n) = u_diag_sub(i,j,m,n) + contrib * (basal_coef_loc + drag_newt_loc * u_curr_loc**2)
-          v_diag_sub(i,j,m,n) = v_diag_sub(i,j,m,n) + contrib * (basal_coef_loc + drag_newt_loc * v_curr_loc**2)
-        else
-          u_diag_sub(i,j,m,n) = u_diag_sub(i,j,m,n) + contrib * basal_coef_loc
-          v_diag_sub(i,j,m,n) = v_diag_sub(i,j,m,n) + contrib * basal_coef_loc
-        endif
-      enddo ; enddo
-    endif
-  enddo ; enddo ; enddo ; enddo
+        do n=1,2 ; do m=1,2
+          phi_mn_sq = Phisub(qx,qy,i,j,m,n)**2
+          contrib   = (subarea * 0.25) * phi_mn_sq
+          ! Picard diagonal + Newton diagonal (u_curr^2 for u-block, v_curr^2 for v-block)
+          if (CS%doing_newton) then
+            u_diag_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc + drag_newt_loc * u_curr_loc**2)
+            v_diag_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc + drag_newt_loc * v_curr_loc**2)
+          else
+            u_diag_qp_nd(qx,qy,m,n) = contrib * basal_coef_loc
+            v_diag_qp_nd(qx,qy,m,n) = contrib * basal_coef_loc
+          endif
+        enddo ; enddo
+      endif
+    enddo ; enddo
+
+    do n=1,2 ; do m=1,2
+      u_diag_sub(i,j,m,n) = (u_diag_qp_nd(1,1,m,n) + u_diag_qp_nd(2,2,m,n)) + &
+                            (u_diag_qp_nd(1,2,m,n) + u_diag_qp_nd(2,1,m,n))
+      v_diag_sub(i,j,m,n) = (v_diag_qp_nd(1,1,m,n) + v_diag_qp_nd(2,2,m,n)) + &
+                            (v_diag_qp_nd(1,2,m,n) + v_diag_qp_nd(2,1,m,n))
+    enddo ; enddo
+  enddo ; enddo
 
   do n=1,2 ; do m=1,2
     call sum_square_matrix(u_diag(m,n), u_diag_sub(:,:,m,n), nsub)
