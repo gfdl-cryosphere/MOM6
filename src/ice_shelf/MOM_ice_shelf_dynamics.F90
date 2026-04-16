@@ -232,6 +232,11 @@ type, public :: ice_shelf_dyn_CS ; private
                     !! 2: exit based on "fixed point" metric (|u - u_last| / |u| < tol) where | | is infty-norm
                     !! 3: exit based on change of solution norm 2*abs(|u|-|u_last|)/(|u|+|u_last|) where | | is L2-norm
                     !! 4: exit based on nonlin residual  | F | / | F_0 | where | | is L2-norm
+                    !! 5: exit based on relative residual | F | / | tau | where | | is L2-norm
+  logical :: ssa_add_rel_resid !< Nonlinear error in velocity solve will also depend on the
+                                   !! L2 residual norm relative to RHS norm
+  real :: rr_nonlinear_tolerance !< If ssa_add_rel_resid, the additional nonlin tolerance in the iterative
+                    !! velocity solve used for the relative residual [nondim]
   ! for write_ice_shelf_energy
   type(time_type) :: energysavedays            !< The interval between writing the energies
                                                !! and other integral quantities of the run.
@@ -633,8 +638,18 @@ subroutine initialize_ice_shelf_dyn(param_file, Time, ISS, CS, G, US, diag, new_
     call get_param(param_file, mdl, "NONLIN_SOLVE_ERR_MODE", CS%nonlin_solve_err_mode, &
                 "Choose whether nonlin error in vel solve is based on nonlinear "//&
                 "Linf norm residual (1), Linf norm relative change since last iteration (2), "//&
-                "change in solution L2 norm (3), L2 norm residual (4)", default=3)
-
+                "change in solution L2 norm (3), L2 norm residual (4), L2 backward norm (5)", default=3)
+    if (CS%nonlin_solve_err_mode /= 5) then
+      call get_param(param_file, mdl, "SSA_ADD_REL_RESID", CS%ssa_add_rel_resid, &
+                  "Nonlinear error in vel solve will also depend on "// &
+                  "L2 residual norm relative to RHS norm.", default=.false.)
+    else
+      CS%ssa_add_rel_resid = .false. !Avoids redundantly calculating err_mode 5 twice
+    endif
+    call get_param(param_file, mdl, "ICE_RR_NONLINEAR_TOLERANCE", CS%rr_nonlinear_tolerance, &
+              "if ssa_add_rel_resid, the additional nonlin tolerance "//&
+              "in the iterative velocity solve for the residual norm relative to RHS norm", &
+              units="nondim", default=1.e-4)
     call get_param(param_file, mdl, "SHELF_MOVING_FRONT", CS%moving_shelf_front, &
                  "Specify whether to advance shelf front (and calve).", &
                  default=.false.)
@@ -1524,11 +1539,14 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   real, dimension(SZDI_(G),SZDJ_(G)) :: float_cond ! If GL_regularize=true, indicates cells containing
                                                 ! the grounding line (float_cond=1) or not (float_cond=0)
   real, dimension(SZDIB_(G),SZDJB_(G)) :: Normvec  ! Velocities used for convergence [L2 T-2 ~> m2 s-2]
+  logical :: converged ! Indicates nonlinear convergence
+  logical :: calc_Au_for_convergence ! Used for convergence criteria than need a CG_action
   character(len=160) :: mesg  ! The text of an error message
   integer :: conv_flag, i, j, k,l, iter, nodefloat
   integer :: Isdq, Iedq, Jsdq, Jedq, isd, ied, jsd, jed
   integer :: Iscq, Iecq, Jscq, Jecq, isc, iec, jsc, jec
   real    :: err_max, err_tempu, err_tempv, err_init ! Errors in [R L3 Z T-2 ~> kg m s-2] or [L T-1 ~> m s-1]
+  real    :: norm_tau, err_rr ! Errors in [R L3 Z T-2 ~> kg m s-2] for relative residual
   real    :: ew_resid       = 0.0  ! L2 norm of stress residual ||A(u)u - tau|| for Eisenstat-Walker [kg m s-2]
   real    :: ew_prev_resid  = 0.0  ! Previous ew_resid; 0.0 flags first Newton call [kg m s-2]
   real    :: ew_eta         = 0.0  ! Current EW inner tolerance [nondim]
@@ -1582,15 +1600,15 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   ! Warning: This turns off Picard entirely and may not converge.
   if (CS%newton_after_tolerance<=0.0) CS%doing_newton=.true.
 
+  ! Calculate RHS
   call calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, CS%OD_av)
   call pass_vector(taudx, taudy, G%domain, TO_ALL, BGRID_NE)
+
   ! This is to determine which cells contain the grounding line, the criterion being that the cell
   ! is ice-covered, with some nodes floating and some grounded flotation condition is estimated by
   ! assuming topography is cellwise constant and H is bilinear in a cell; floating where
   ! rho_i/rho_w * H_node - D is negative
-
   ! need to make this conditional on GL interp
-
   if (CS%GL_regularize) then
 
     call interpolate_H_to_B(G, ISS%h_shelf, ISS%hmask, H_node, CS%min_h_shelf)
@@ -1615,6 +1633,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
 
   endif
 
+  ! Calculate basal drag constants and initial velocity
   call calc_shelf_basal_prefactors(CS, ISS, G, US)
   call calc_shelf_visc(CS, ISS, G, US, u_shlf, v_shlf)
   if (CS%doing_newton) then
@@ -1626,15 +1645,16 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
     call pass_var(CS%ice_visc, G%domain, complete=.true.)
   endif
 
-  if (CS%nonlin_solve_err_mode == 1) then
-
+  ! Calculate err_init, the denominator for some convergence criteria
+  if (CS%nonlin_solve_err_mode == 1 .or. CS%nonlin_solve_err_mode == 4) then
     Au(:,:) = 0.0 ; Av(:,:) = 0.0
-
     call CG_action(CS, Au, Av, u_shlf, v_shlf, CS%Phi, CS%Phisub, CS%umask, CS%vmask, ISS%hmask, H_node, &
-                   CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
-                   G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
+      CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
+      G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
     call pass_vector(Au, Av, G%domain, TO_ALL, BGRID_NE) ! TODO: is this needed?
+  endif
 
+  if (CS%nonlin_solve_err_mode == 1) then
     err_init = 0 ; err_tempu = 0 ; err_tempv = 0
     do J=G%JscB,G%JecB ; do I=G%IscB,G%IecB
       if (CS%umask(I,J) == 1) then
@@ -1646,8 +1666,8 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
         if (err_tempv >= err_init) err_init = err_tempv
       endif
     enddo ; enddo
-
     call max_across_PEs(err_init)
+
   elseif (CS%nonlin_solve_err_mode == 3) then
     Normvec(:,:) = 0.0
     do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
@@ -1657,10 +1677,6 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
     Norm = sqrt( reproducing_sum( Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, unscale=US%L_T_to_m_s**2 ) )
 
   elseif (CS%nonlin_solve_err_mode == 4) then
-    Au(:,:) = 0 ; Av(:,:) = 0
-    call CG_action(CS, Au, Av, u_shlf, v_shlf, CS%Phi, CS%Phisub, CS%umask, CS%vmask, ISS%hmask, &
-      H_node, CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
-      G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
     Normvec(:,:) = 0.0
     do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
       if (CS%umask(I,J) == 1) Normvec(I,J) = (Au(I,J) - taudx(I,J))**2
@@ -1670,15 +1686,34 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
       unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
   endif
 
+  if (CS%nonlin_solve_err_mode == 5 .or. CS%ssa_add_rel_resid) then
+    Normvec(:,:) = 0.0
+    do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
+      if (CS%umask(I,J) == 1) Normvec(I,J) = taudx(I,J)**2
+      if (CS%vmask(I,J) == 1) Normvec(I,J) = taudy(I,J)**2
+    enddo ; enddo
+    if (CS%nonlin_solve_err_mode == 5) then
+      err_init = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
+        unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
+    else
+      norm_tau = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
+        unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
+    endif
+  endif
+
   u_last(:,:) = u_shlf(:,:) ; v_last(:,:) = v_shlf(:,:)
   CS%cg_tol_newton = CS%cg_tolerance
   ew_prev_resid  = 0.0
   ew_eta_prev    = CS%cg_tolerance
+  converged = .false.
+  calc_Au_for_convergence = (CS%nonlin_solve_err_mode == 1 .or. CS%nonlin_solve_err_mode == 4 .or. &
+                             CS%nonlin_solve_err_mode == 5 .or. CS%ssa_add_rel_resid)
 
   !! begin loop
 
   do iter=1,50
 
+    ! The linear solve
     call ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H_node, CS%float_cond, &
                                ISS%hmask, conv_flag, iters, time, CS%Phi, CS%Phisub)
 
@@ -1690,8 +1725,9 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
     write(mesg,*) "ice_shelf_solve_outer: linear solve done in ",iters," iterations"
     call MOM_mesg(mesg, 5)
 
-    call calc_shelf_basal_prefactors(CS, ISS, G, US)
+    ! Update viscosity
     call calc_shelf_visc(CS, ISS, G, US, u_shlf, v_shlf)
+
     if (CS%doing_newton) then
       call pass_var(CS%ice_visc, G%domain, complete=.false.)
       call pass_var(CS%newton_str_sh, G%domain, complete=.false.)
@@ -1701,30 +1737,48 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
       call pass_var(CS%ice_visc, G%domain, complete=.true.)
     endif
 
-    if (CS%nonlin_solve_err_mode == 1) then
-
+    ! Calculate convergence norms
+    if (calc_Au_for_convergence) then
       Au(:,:) = 0 ; Av(:,:) = 0
+      call CG_action(CS, Au, Av, u_shlf, v_shlf, CS%Phi, CS%Phisub, CS%umask, CS%vmask, ISS%hmask, &
+        H_node, CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
+        G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
 
-      call CG_action(CS, Au, Av, u_shlf, v_shlf, CS%Phi, CS%Phisub, CS%umask, CS%vmask, ISS%hmask, H_node, &
-                     CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
-                     G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
+      if (CS%nonlin_solve_err_mode == 1) then
+        err_max = 0
 
-      err_max = 0
+        do J=G%jscB,G%jecB ; do I=G%iscB,G%iecB
+          if (CS%umask(I,J) == 1) then
+            err_tempu = ABS(Au(I,J) - taudx(I,J))
+            if (err_tempu >= err_max) err_max = err_tempu
+          endif
+          if (CS%vmask(I,J) == 1) then
+            err_tempv = ABS(Av(I,J) - taudy(I,J))
+            if (err_tempv >= err_max) err_max = err_tempv
+          endif
+        enddo ; enddo
 
-      do J=G%jscB,G%jecB ; do I=G%iscB,G%iecB
-        if (CS%umask(I,J) == 1) then
-          err_tempu = ABS(Au(I,J) - taudx(I,J))
-          if (err_tempu >= err_max) err_max = err_tempu
+        call max_across_PEs(err_max)
+      endif
+
+      if (CS%nonlin_solve_err_mode == 4 .or. CS%nonlin_solve_err_mode == 5 .or. CS%ssa_add_rel_resid) then
+        Normvec(:,:) = 0.0
+        do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
+          if (CS%umask(I,J) == 1) Normvec(I,J) = (Au(I,J) - taudx(I,J))**2
+          if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (Av(I,J) - taudy(I,J))**2
+        enddo ; enddo
+        if (CS%nonlin_solve_err_mode == 4 .or. CS%nonlin_solve_err_mode == 5) then
+          err_max = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
+            unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
+          if (CS%ssa_add_rel_resid) err_rr = err_max
+        elseif (CS%ssa_add_rel_resid) then
+          err_rr = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
+            unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
         endif
-        if (CS%vmask(I,J) == 1) then
-          err_tempv = ABS(Av(I,J) - taudy(I,J))
-          if (err_tempv >= err_max) err_max = err_tempv
-        endif
-      enddo ; enddo
+      endif
+    endif
 
-      call max_across_PEs(err_max)
-
-    elseif (CS%nonlin_solve_err_mode == 2) then
+    if (CS%nonlin_solve_err_mode == 2) then
 
       err_max=0. ;  max_vel = 0 ; tempu = 0 ; tempv = 0 ; err_tempu = 0
       do J=G%jscB,G%jecB ; do I=G%iscB,G%iecB
@@ -1758,28 +1812,29 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
       enddo ; enddo
       Norm = sqrt( reproducing_sum( Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, unscale=US%L_T_to_m_s**2 ) )
       err_max = 2.*abs(Norm-PrevNorm) ; err_init = Norm+PrevNorm
-
-    elseif (CS%nonlin_solve_err_mode == 4) then
-      Au(:,:) = 0 ; Av(:,:) = 0
-      call CG_action(CS, Au, Av, u_shlf, v_shlf, CS%Phi, CS%Phisub, CS%umask, CS%vmask, ISS%hmask, &
-        H_node, CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
-        G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
-      Normvec(:,:) = 0.0
-      do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-        if (CS%umask(I,J) == 1) Normvec(I,J) = (Au(I,J) - taudx(I,J))**2
-        if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (Av(I,J) - taudy(I,J))**2
-      enddo ; enddo
-      err_max = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
-        unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
     endif
 
+    !Test convergence
     if (err_max <= CS%nonlinear_tolerance * err_init) then
+      if (CS%ssa_add_rel_resid) then
+        if (err_rr <= CS%rr_nonlinear_tolerance * norm_tau) converged = .true.
+      else
+        converged = .true.
+      endif
+    endif
+
+    if (converged) then
       exit
     else
-
       write(mesg,*) "ice_shelf_solve_outer: nonlinear fractional residual = ", err_max/err_init
       call MOM_mesg(mesg, 5)
 
+      if (CS%ssa_add_rel_resid) then
+        write(mesg,*) "ice_shelf_solve_outer: nonlinear relative stress residual = ", err_rr/norm_tau
+        call MOM_mesg(mesg, 5)
+      endif
+
+      ! Activate Newton
       if (err_max <= CS%newton_after_tolerance * err_init .and. .not. CS%doing_newton) then
         CS%doing_newton = .true.
         write(mesg,*) "ice_shelf_solve_outer: switching to Newton iterations at iter = ", iter
@@ -1789,11 +1844,11 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
         call pass_vector(CS%newton_str_ux, CS%newton_str_vy, G%domain, TO_ALL, AGRID)
       endif
 
-      ! Eisenstat-Walker Choice II (Eisenstat & Walker 1994): η_k = γ*(||F_k||/||F_{k-1}||)^α
+      ! Inexact Newton: Adapt inner solver tolerance to prevent oversolving
+      ! Based on Eisenstat-Walker Choice II (Eisenstat & Walker 1994): η_k = γ*(||F_k||/||F_{k-1}||)^α
       ! with γ=0.9, α=2 as default.  Uses the L2 norm of the nonlinear stress residual ||Au - tau||_2,
-      ! consistent with the inner solver's convergence check (sv3dsums(3)).  For mode 1,
-      ! Au/Av are already available from the residual evaluation above; modes 2/3 require an
-      ! extra CG_action call.  The first Newton step uses the standard cg_tolerance.
+      ! consistent with the inner solver's convergence check (sv3dsums(3)).
+      ! The first Newton step uses the standard cg_tolerance.
       if (CS%doing_newton .and. CS%newton_adapt_cg_tol) then
         if (CS%nonlin_solve_err_mode == 4) then
           ew_resid=err_max
@@ -1816,6 +1871,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
           ! First Newton iteration: seed residuals; use standard cg_tolerance this step
           ew_prev_resid  = ew_resid
         else
+          ! Safeguarding and oversolving adjustments:
           ! Eisenstat-Walker Choice II safeguard base formula
           ew_eta = CS%ew_gamma * (ew_resid / ew_prev_resid)**CS%ew_alpha
           ew_stol = CS%ew_gamma * ew_eta_prev**CS%ew_alpha
@@ -1834,6 +1890,9 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
             ! ew_stol = CS%ew_gamma * ew_resid_first * CS%nonlinear_tolerance / ew_resid
             ! Here, adapt for all nonlin_solve_err_modes:
             ew_stol = CS%ew_gamma * err_init * CS%nonlinear_tolerance / err_max
+            if (CS%ssa_add_rel_resid) then
+              ew_stol = min(ew_stol, CS%ew_gamma * norm_tau * CS%rr_nonlinear_tolerance / err_rr)
+            endif
             ew_eta  = min(CS%cg_tolerance, max(ew_eta, ew_stol))
             write(mesg,*) "ice_shelf_solve_outer: ew_stol = ", ew_stol
             call MOM_mesg(mesg, 8)
@@ -1847,13 +1906,16 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
         endif
       endif
     endif
-
   enddo
   CS%doing_newton = .false.
   CS%cg_tol_newton = CS%cg_tolerance
 
   write(mesg,*) "ice_shelf_solve_outer: nonlinear fractional residual = ", err_max/err_init
   call MOM_mesg(mesg)
+  if (CS%ssa_add_rel_resid) then
+    write(mesg,*) "ice_shelf_solve_outer: nonlinear relative residual = ", err_rr/norm_tau
+    call MOM_mesg(mesg, 5)
+  endif
   write(mesg,*) "ice_shelf_solve_outer: exiting nonlinear solve after ",iter," iterations"
   call MOM_mesg(mesg)
 
