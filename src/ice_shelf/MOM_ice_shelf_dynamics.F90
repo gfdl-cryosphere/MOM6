@@ -1796,8 +1796,7 @@ end subroutine ice_shelf_solve_outer
 subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H_node, float_cond, &
                                   hmask, conv_flag, iters, time, Phi, Phisub)
   type(ice_shelf_dyn_CS), intent(in)    :: CS !< A pointer to the ice shelf control structure
-  type(ice_shelf_state),  intent(in)    :: ISS !< A structure with elements that describe
-                                           !! the ice-shelf state
+  type(ice_shelf_state),  intent(in)    :: ISS !< A structure with elements that describe the ice-shelf state
   type(ocean_grid_type),  intent(inout) :: G  !< The grid structure used by the ice shelf.
   type(unit_scale_type),  intent(in)    :: US !< A structure containing unit conversion factors
   real, dimension(SZDIB_(G),SZDJB_(G)), &
@@ -1809,33 +1808,32 @@ subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H
   real, dimension(SZDIB_(G),SZDJB_(G)), &
                           intent(in)    :: taudy  !< The y-direction driving stress [R L3 Z T-2 ~> kg m s-2]
   real, dimension(SZDIB_(G),SZDJB_(G)), &
-                          intent(in)    :: H_node !< The ice shelf thickness at nodal (corner)
-                                             !! points [Z ~> m].
+                          intent(in)    :: H_node !< The ice shelf thickness at nodal (corner) points [Z ~> m].
   real, dimension(SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: float_cond !< If GL_regularize=true, indicates cells containing
-                                                !! the grounding line (float_cond=1) or not (float_cond=0)
+                                                      !! the grounding line (float_cond=1) or not (float_cond=0)
   real, dimension(SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: hmask !< A mask indicating which tracer points are
-                                             !! partly or fully covered by an ice-shelf
+                                                 !! partly or fully covered by an ice-shelf
   integer,                intent(out)   :: conv_flag !< A flag indicating whether (1) or not (0) the
-                                           !! iterations have converged to the specified tolerance
+                                                     !! iterations have converged to the specified tolerance
   integer,                intent(out)   :: iters !< The number of iterations used in the solver.
   type(time_type),        intent(in)    :: Time !< The current model time
   real, dimension(8,4,SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: Phi !< The gradients of bilinear basis elements at Gaussian
-                                             !! quadrature points surrounding the cell vertices [L-1 ~> m-1].
+                                               !! quadrature points surrounding the cell vertices [L-1 ~> m-1].
   real, dimension(:,:,:,:,:,:), &
                           intent(in)    :: Phisub !< Quadrature structure weights at subgridscale
-                                            !! locations for finite element calculations [nondim]
+                                                  !! locations for finite element calculations [nondim]
 
   real, dimension(SZDIB_(G),SZDJB_(G)) :: &
-        RHSu, RHSv, &     ! Right hand side of the stress balance [R L3 Z T-2 ~> m kg s-2]
+        RHSu, RHSv, &      ! Right hand side of the stress balance [R L3 Z T-2 ~> m kg s-2]
         Au, Av, &          ! Matrix-vector product A*x [R L3 Z T-2 ~> kg m s-2]
         DIAGu, DIAGv, &    ! Diagonals [R L2 Z T-1 ~> kg s-1]
         IDIAGu, IDIAGv     ! Reciprocal diagonals [R-1 L-2 Z-1 T ~> kg-1 s]
-  real    :: rhoi_rhow      ! The density of ice divided by a typical water density [nondim]
-  real    :: resid_scale    ! A scaling factor for redimensionalizing the global residuals
-                            ! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+  real    :: rhoi_rhow     ! The density of ice divided by a typical water density [nondim]
+  real    :: resid_scale   ! A scaling factor for redimensionalizing the global residuals
+                           ! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
   integer :: Is_sum, Js_sum, Ie_sum, Je_sum ! Loop bounds for global sums or arrays starting at 1.
   integer :: Iscq_sv, Jscq_sv ! Starting loop bound for sum_vec arrays
   integer :: I, J
@@ -1890,22 +1888,22 @@ subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H
   select case (CS%inner_solver)
     case (INNER_CG)
       call ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, Av, &
-                                     IDIAGu, IDIAGv, H_node, float_cond, hmask, &
-                                     rhoi_rhow, resid_scale, Phi, Phisub, conv_flag, iters, &
-                                     Is_sum, Js_sum, Ie_sum, Je_sum, Iscq_sv, Jscq_sv)
+                                    IDIAGu, IDIAGv, H_node, float_cond, hmask, &
+                                    rhoi_rhow, resid_scale, Phi, Phisub, conv_flag, iters, &
+                                    Is_sum, Js_sum, Ie_sum, Je_sum, Iscq_sv, Jscq_sv)
     case (INNER_MINRES)
       call ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, Av, &
-                                         IDIAGu, IDIAGv, H_node, float_cond, hmask, &
-                                         rhoi_rhow, resid_scale, Phi, Phisub, conv_flag, iters, &
-                                         Is_sum, Js_sum, Ie_sum, Je_sum, Iscq_sv, Jscq_sv)
+                                        IDIAGu, IDIAGv, H_node, float_cond, hmask, &
+                                        rhoi_rhow, resid_scale, Phi, Phisub, conv_flag, iters, &
+                                        Is_sum, Js_sum, Ie_sum, Je_sum, Iscq_sv, Jscq_sv)
     case (INNER_CR)
       call ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, Av, &
-                                     IDIAGu, IDIAGv, H_node, float_cond, hmask, &
-                                     rhoi_rhow, resid_scale, Phi, Phisub, conv_flag, iters, &
-                                     Is_sum, Js_sum, Ie_sum, Je_sum, Iscq_sv, Jscq_sv)
+                                    IDIAGu, IDIAGv, H_node, float_cond, hmask, &
+                                    rhoi_rhow, resid_scale, Phi, Phisub, conv_flag, iters, &
+                                    Is_sum, Js_sum, Ie_sum, Je_sum, Iscq_sv, Jscq_sv)
   end select
 
-  ! Shared teardown: Apply boundary conditions
+  ! Apply boundary conditions
   do J=Jsdq,Jedq ; do I=Isdq,Iedq
       if (CS%umask(I,J) == 3) then
         u_shlf(I,J) = CS%u_bdry_val(I,J)
@@ -1960,7 +1958,7 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
                           intent(in)    :: hmask !< Ice shelf coverage mask
   real,                   intent(in)    :: rhoi_rhow !< Ice-to-ocean density ratio [nondim]
   real,                   intent(in)    :: resid_scale !< Scaling for inner products
-                                           !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+                                                       !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
   real, dimension(8,4,SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: Phi !< Basis element gradients at quadrature points [L-1 ~> m-1]
   real, dimension(:,:,:,:,:,:), &
@@ -2060,7 +2058,7 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   !!              !!
   !! MAIN CG LOOP !!
   !!              !!
-!!!!!!!!!!!!!!!!!!
+  !!!!!!!!!!!!!!!!!!
 
   do iter = 1,CS%cg_max_iterations
 
@@ -2184,7 +2182,7 @@ subroutine ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, A
                           intent(in)    :: hmask !< Ice shelf coverage mask
   real,                   intent(in)    :: rhoi_rhow !< Ice-to-ocean density ratio [nondim]
   real,                   intent(in)    :: resid_scale !< Scaling for inner products
-                                           !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+                                                       !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
   real, dimension(8,4,SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: Phi !< Basis element gradients at quadrature points [L-1 ~> m-1]
   real, dimension(:,:,:,:,:,:), &
