@@ -2050,12 +2050,12 @@ subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H
   RHSu(:,:) = taudx(:,:) ; RHSv(:,:) = taudy(:,:)
   call pass_vector(RHSu, RHSv, G%domain, TO_ALL, BGRID_NE, complete=.false.)
 
-  call matrix_diagonal(CS, G, US, float_cond, H_node, CS%ice_visc, , u_shlf, v_shlf,, CS%basal_traction, &
+  call matrix_diagonal(CS, G, US, float_cond, H_node, CS%ice_visc, u_shlf, v_shlf, &
                        hmask, rhoi_rhow, Phi, Phisub, DIAGu, DIAGv)
   call pass_vector(DIAGu, DIAGv, G%domain, TO_ALL, BGRID_NE, complete=.false.)
 
   call CG_action(CS, Au, Av, u_shlf, v_shlf, Phi, Phisub, CS%umask, CS%vmask, hmask, &
-                 H_node, CS%ice_visc, float_cond, CS%bed_elev, u_shlf, v_shlf, CS%basal_traction, &
+                 H_node, CS%ice_visc, float_cond, CS%bed_elev, u_shlf, v_shlf, &
                  G, US, isc-1, iec+1, jsc-1, jec+1, rhoi_rhow, use_newton_in=.false.)
   call pass_vector(Au, Av, G%domain, TO_ALL, BGRID_NE, complete=.true.)
 
@@ -2156,12 +2156,10 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   integer,                intent(in)    :: Iscq_sv !< Starting i-index for sum_vec arrays
   integer,                intent(in)    :: Jscq_sv !< Starting j-index for sum_vec arrays
 
-  real, dimension(SZDIB_(G),SZDJB_(G)), &
-                         intent(in)    :: u_curr  !< Frozen current iterate u^k, used to evaluate basal friction
-                                               !! at quadrature points [L T-1 ~> m s-1]
-  real, dimension(SZDIB_(G),SZDJB_(G)), &
-                         intent(in)    :: v_curr  !< Frozen current iterate v^k, used to evaluate basal friction
-                                               !! at quadrature points [L T-1 ~> m s-1]
+  real, dimension(SZDIB_(G),SZDJB_(G))  :: u_curr  !< Frozen current iterate u^k, used to evaluate basal friction
+                                                   !! at quadrature points [L T-1 ~> m s-1]
+  real, dimension(SZDIB_(G),SZDJB_(G))  :: v_curr  !< Frozen current iterate v^k, used to evaluate basal friction
+                                                   !! at quadrature points [L T-1 ~> m s-1]
   real, dimension(SZDIB_(G),SZDJB_(G)) ::  &
                         Ru, Rv, &     ! Residuals [R L3 Z T-2 ~> m kg s-2]
                         Zu, Zv, &     ! Preconditioned residuals [L T-1 ~> m s-1]
@@ -2225,7 +2223,7 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
 
   rho_old = sv3dsums(1)
   !resid0 = sqrt(sv3dsums(2))
-  resid0tol2 = CS%cg_tol_newton**2 * sv3dsums(2)
+  resid0tol2 = CS%cg_tol_current**2 * sv3dsums(2)
 
   if (G%symmetric) then
     max_cg_halo=min(nx_halo,ny_halo)
@@ -2258,7 +2256,7 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
     Au(:,:) = 0 ; Av(:,:) = 0
 
     call CG_action(CS, Au, Av, Du, Dv, Phi, Phisub, CS%umask, CS%vmask, hmask, &
-                   H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, CS%basal_traction, &
+                   H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, &
                    G, US, is, ie, js, je, rhoi_rhow)
 
     sum_vec(:,:) = 0.0
@@ -2389,12 +2387,10 @@ subroutine ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, A
   integer,                intent(in)    :: Iscq_sv !< Starting i-index for sum_vec arrays
   integer,                intent(in)    :: Jscq_sv !< Starting j-index for sum_vec arrays
 
-  real, dimension(SZDIB_(G),SZDJB_(G)), &
-                         intent(in)    :: u_curr  !< Frozen current iterate u^k, used to evaluate basal friction
-                                               !! at quadrature points [L T-1 ~> m s-1]
-  real, dimension(SZDIB_(G),SZDJB_(G)), &
-                         intent(in)    :: v_curr  !< Frozen current iterate v^k, used to evaluate basal friction
-                                               !! at quadrature points [L T-1 ~> m s-1]
+  real, dimension(SZDIB_(G),SZDJB_(G))  :: u_curr  !< Frozen current iterate u^k, used to evaluate basal friction
+                                                   !! at quadrature points [L T-1 ~> m s-1]
+  real, dimension(SZDIB_(G),SZDJB_(G))  :: v_curr  !< Frozen current iterate v^k, used to evaluate basal friction
+                                                   !! at quadrature points [L T-1 ~> m s-1]
   real, dimension(SZDIB_(G),SZDJB_(G)) ::  &
         V_old_u, V_old_v, V_curr_u, V_curr_v, V_new_u, V_new_v, & ! Lanczos basis vectors [R L3 Z T-2 ~> m kg s-2]
         Z_curr_u, Z_curr_v, Z_new_u, Z_new_v, &    ! Preconditioned Lanczos vectors [L T-1 ~> m s-1]
@@ -2409,7 +2405,7 @@ subroutine ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, A
   real    :: eta_curr    ! Effective step magnitude for current iteration [R L4 Z T-3 ~> m2 kg s-3]
   real    :: c0, s0, c1, s1, c2, s2  ! Givens rotation cosines and sines [nondim]
   real    :: d0, d1, d2  ! Tridiagonal QR factorization coefficients [R L4 Z T-3 ~> m2 kg s-3]
-  real    :: resid0tol   ! Convergence tolerance (CS%cg_tol_newton * beta1) [R L4 Z T-3 ~> m2 kg s-3]
+  real    :: resid0tol   ! Convergence tolerance (CS%cg_tol_current * beta1) [R L4 Z T-3 ~> m2 kg s-3]
   real    :: current_norm ! Current MINRES residual norm estimate [R L4 Z T-3 ~> m2 kg s-3]
   real    :: sv3dsum     ! Global reproducing sum of sum_vec_3d [R L4 Z T-3 ~> m2 kg s-3]
   real    :: Ibeta1      ! Reciprocal of beta1 [nondim]
@@ -2472,7 +2468,7 @@ subroutine ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, A
   call pass_vector(Z_curr_u, Z_curr_v, G%domain, TO_ALL, BGRID_NE)
 
   eta = beta1
-  resid0tol = CS%cg_tol_newton * beta1
+  resid0tol = CS%cg_tol_current * beta1
   conv_flag = 0
 
   c0 = 1.0 ; s0 = 0.0 ; c1 = 1.0 ; s1 = 0.0
@@ -2488,7 +2484,7 @@ subroutine ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, A
     ! --- STEP 1: Matrix Vector Product ---
     Qu(:,:) = 0 ; Qv(:,:) = 0
     call CG_action(CS, Qu, Qv, Z_curr_u, Z_curr_v, Phi, Phisub, CS%umask, CS%vmask, hmask, &
-                   H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, CS%basal_traction, &
+                   H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, &
                    G, US, isc-1, iec+1, jsc-1, jec+1, rhoi_rhow)
     ! --- STEP 2: alpha = q dot z_curr ---
     sum_vec_3d(:,:) = 0.0
@@ -2631,12 +2627,10 @@ subroutine ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   integer,                intent(in)    :: Iscq_sv !< Starting i-index for sum_vec arrays
   integer,                intent(in)    :: Jscq_sv !< Starting j-index for sum_vec arrays
 
-  real, dimension(SZDIB_(G),SZDJB_(G)), &
-                         intent(in)    :: u_curr  !< Frozen current iterate u^k, used to evaluate basal friction
-                                               !! at quadrature points [L T-1 ~> m s-1]
-  real, dimension(SZDIB_(G),SZDJB_(G)), &
-                         intent(in)    :: v_curr  !< Frozen current iterate v^k, used to evaluate basal friction
-                                               !! at quadrature points [L T-1 ~> m s-1]
+  real, dimension(SZDIB_(G),SZDJB_(G))  :: u_curr  !< Frozen current iterate u^k, used to evaluate basal friction
+                                                   !! at quadrature points [L T-1 ~> m s-1]
+  real, dimension(SZDIB_(G),SZDJB_(G))  :: v_curr  !< Frozen current iterate v^k, used to evaluate basal friction
+                                                   !! at quadrature points [L T-1 ~> m s-1]
   real, dimension(SZDIB_(G),SZDJB_(G)) ::  &
                         Ru, Rv, &         ! Residuals (r) [R L3 Z T-2 ~> m kg s-2]
                         Zu, Zv, &         ! Preconditioned residuals (z = M^-1 r) [L T-1 ~> m s-1]
@@ -2690,7 +2684,7 @@ subroutine ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   ! Compute A * z_0
   Au(:,:) = 0 ; Av(:,:) = 0
   call CG_action(CS, Au, Av, Zu, Zv, Phi, Phisub, CS%umask, CS%vmask, hmask, &
-                 H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, CS%basal_traction, &
+                 H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, &
                  G, US, isc-1, iec+1, jsc-1, jec+1, rhoi_rhow)
   call pass_vector(Au, Av, G%domain, TO_ALL, BGRID_NE)
 
@@ -2714,7 +2708,7 @@ subroutine ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   r_norm_sq = sv3dsums(1)
   z_w_sum   = sv3dsums(2)
 
-  resid0tol2 = CS%cg_tol_newton**2 * r_norm_sq
+  resid0tol2 = CS%cg_tol_current**2 * r_norm_sq
   conv_flag = 0
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -2768,7 +2762,7 @@ subroutine ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
     ! --- STEP 3: w_{k+1} = A z_{k+1} ---
     Au(:,:) = 0 ; Av(:,:) = 0
     call CG_action(CS, Au, Av, Zu, Zv, Phi, Phisub, CS%umask, CS%vmask, hmask, &
-                   H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, CS%basal_traction, &
+                   H_node, CS%ice_visc, float_cond, CS%bed_elev, u_curr, v_curr, &
                    G, US, isc-1, iec+1, jsc-1, jec+1, rhoi_rhow)
     call pass_vector(Au, Av, G%domain, TO_ALL, BGRID_NE)
 
