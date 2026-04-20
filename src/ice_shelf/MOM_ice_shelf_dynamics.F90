@@ -212,9 +212,11 @@ type, public :: ice_shelf_dyn_CS ; private
   logical :: calve_to_mask       !< If true, calve off the ice shelf when it passes the edge of a mask.
   real :: min_thickness_simple_calve !< min. ice shelf thickness criteria for calving [Z ~> m].
   real :: T_shelf_missing   !< An ice shelf temperature to use where there is no ice shelf [C ~> degC]
-  real :: cg_tolerance !< The tolerance in the CG solver, relative to initial residual, that
+  real :: cg_tolerance !< For Picard iterations, the tolerance in the CG solver, relative to initial residual, that
                        !! determines when to stop the conjugate gradient iterations [nondim].
-  real :: cg_tol_newton !< Working CG tolerance for the current inner solve [nondim].
+  real :: cg_newton_tolerance !< For inexact Newton iterations, the initial tolerance in the CG solver, relative to
+                              !!initial residual, that determines when to stop the conjugate gradient iterations [nondim].
+  real :: cg_tol_current !< Working CG tolerance for the current inner solve [nondim].
   real :: nonlinear_tolerance !< The fractional nonlinear tolerance, relative to the initial error,
                               !! that sets when to stop the iterative velocity solver [nondim]
   real :: newton_after_tolerance !< The fractional nonlinear tolerance, relative to the initial error, at
@@ -604,8 +606,12 @@ subroutine initialize_ice_shelf_dyn(param_file, Time, ISS, CS, G, US, diag, new_
     call get_param(param_file, mdl, "DENSITY_ICE", CS%density_ice, &
                  "A typical density of ice.", units="kg m-3", default=917.0, scale=US%kg_m3_to_R)
     call get_param(param_file, mdl, "CONJUGATE_GRADIENT_TOLERANCE", CS%cg_tolerance, &
-                "tolerance in CG solver, relative to initial residual", units="nondim", default=1.e-6)
-    CS%cg_tol_newton = CS%cg_tolerance  ! Will be tightened adaptively during Newton iterations
+                 "For Picard iterations, the tolerance in CG solver, relative to initial residual", &
+                 units="nondim", default=1.e-6)
+    call get_param(param_file, mdl, "NEWTON_CONJUGATE_GRADIENT_TOLERANCE", CS%cg_newton_tolerance, &
+                 "For inexact Newton iterations, the initial tolerance in CG solver, relative to initial residual", &
+                 units="nondim", default=CS%cg_tolerance)
+    CS%cg_tol_current = CS%cg_tolerance  ! Can be tightened adaptively during inexact Newton iterations
     call get_param(param_file, mdl, "ICE_NONLINEAR_TOLERANCE", CS%nonlinear_tolerance, &
                 "nonlin tolerance in iterative velocity solve", units="nondim", default=1.e-6)
     call get_param(param_file, mdl, "NEWTON_AFTER_TOLERANCE", CS%newton_after_tolerance, &
@@ -629,6 +635,8 @@ subroutine initialize_ice_shelf_dyn(param_file, Time, ISS, CS, G, US, diag, new_
     call get_param(param_file, mdl, "NEWTON_EW_ETA_MAX", CS%ew_eta_max, &
                 "Maximum allowed Eisenstat-Walker eta (between 0 and 1)", &
                 units="nondim", default=0.9, do_not_log=(.not. CS%newton_adapt_cg_tol))
+    if (CS%ew_eta_max<=0 .or. CS%ew_eta_max>= 1) &
+      call MOM_error(FATAL, "NEWTON_EW_ETA_MAX must be between 0 and 1.")
     call get_param(param_file, mdl, "CONJUGATE_GRADIENT_MAXIT", CS%cg_max_iterations, &
                 "max iteratiions in CG solver", default=2000)
     call get_param(param_file, mdl, "THRESH_FLOAT_COL_DEPTH", CS%thresh_float_col_depth, &
@@ -1671,16 +1679,16 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   elseif (CS%nonlin_solve_err_mode == 3) then
     Normvec(:,:) = 0.0
     do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-      if (CS%umask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + u_shlf(I,J)**2
-      if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + v_shlf(I,J)**2
+      if (CS%umask(I,J) == 1) Normvec(I,J) = (u_shlf(I,J)**2)
+      if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (v_shlf(I,J)**2)
     enddo ; enddo
     Norm = sqrt( reproducing_sum( Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, unscale=US%L_T_to_m_s**2 ) )
 
   elseif (CS%nonlin_solve_err_mode == 4) then
     Normvec(:,:) = 0.0
     do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-      if (CS%umask(I,J) == 1) Normvec(I,J) = (Au(I,J) - taudx(I,J))**2
-      if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (Av(I,J) - taudy(I,J))**2
+      if (CS%umask(I,J) == 1) Normvec(I,J) = ((Au(I,J) - taudx(I,J))**2)
+      if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + ((Av(I,J) - taudy(I,J))**2)
     enddo ; enddo
     err_init = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
       unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
@@ -1689,8 +1697,8 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   if (CS%nonlin_solve_err_mode == 5 .or. CS%ssa_add_rel_resid) then
     Normvec(:,:) = 0.0
     do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-      if (CS%umask(I,J) == 1) Normvec(I,J) = taudx(I,J)**2
-      if (CS%vmask(I,J) == 1) Normvec(I,J) = taudy(I,J)**2
+      if (CS%umask(I,J) == 1) Normvec(I,J) = (taudx(I,J)**2)
+      if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (taudy(I,J)**2)
     enddo ; enddo
     if (CS%nonlin_solve_err_mode == 5) then
       err_init = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
@@ -1702,9 +1710,12 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   endif
 
   u_last(:,:) = u_shlf(:,:) ; v_last(:,:) = v_shlf(:,:)
-  CS%cg_tol_newton = CS%cg_tolerance
+  if (CS%doing_newton) then
+    CS%cg_tol_current = CS%cg_newton_tolerance
+  else
+    CS%cg_tol_current = CS%cg_tolerance
+  endif
   ew_prev_resid  = 0.0
-  ew_eta_prev    = CS%cg_tolerance
   converged = .false.
   calc_Au_for_convergence = (CS%nonlin_solve_err_mode == 1 .or. CS%nonlin_solve_err_mode == 4 .or. &
                              CS%nonlin_solve_err_mode == 5 .or. CS%ssa_add_rel_resid)
@@ -1764,8 +1775,8 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
       if (CS%nonlin_solve_err_mode == 4 .or. CS%nonlin_solve_err_mode == 5 .or. CS%ssa_add_rel_resid) then
         Normvec(:,:) = 0.0
         do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-          if (CS%umask(I,J) == 1) Normvec(I,J) = (Au(I,J) - taudx(I,J))**2
-          if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (Av(I,J) - taudy(I,J))**2
+          if (CS%umask(I,J) == 1) Normvec(I,J) = ((Au(I,J) - taudx(I,J))**2)
+          if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + ((Av(I,J) - taudy(I,J))**2)
         enddo ; enddo
         if (CS%nonlin_solve_err_mode == 4 .or. CS%nonlin_solve_err_mode == 5) then
           err_max = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
@@ -1807,8 +1818,8 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
     elseif (CS%nonlin_solve_err_mode == 3) then
       PrevNorm = Norm ; Norm = 0.0 ; Normvec=0.0
       do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-        if (CS%umask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + u_shlf(I,J)**2
-        if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + v_shlf(I,J)**2
+        if (CS%umask(I,J) == 1) Normvec(I,J) = (u_shlf(I,J)**2)
+        if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (v_shlf(I,J)**2)
       enddo ; enddo
       Norm = sqrt( reproducing_sum( Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, unscale=US%L_T_to_m_s**2 ) )
       err_max = 2.*abs(Norm-PrevNorm) ; err_init = Norm+PrevNorm
@@ -1861,15 +1872,17 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
           endif
           Normvec(:,:) = 0.0
           do J=Jscq_sv,Jecq ; do I=Iscq_sv,Iecq
-            if (CS%umask(I,J) == 1) Normvec(I,J) = (Au(I,J) - taudx(I,J))**2
-            if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + (Av(I,J) - taudy(I,J))**2
+            if (CS%umask(I,J) == 1) Normvec(I,J) = ((Au(I,J) - taudx(I,J))**2)
+            if (CS%vmask(I,J) == 1) Normvec(I,J) = Normvec(I,J) + ((Av(I,J) - taudy(I,J))**2)
           enddo ; enddo
           ew_resid = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
             unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
         endif
         if (ew_prev_resid == 0.0) then
-          ! First Newton iteration: seed residuals; use standard cg_tolerance this step
+          ! First Newton iteration: seed residuals; use initial newton cg_tolerance this step
           ew_prev_resid  = ew_resid
+          CS%cg_tol_current = CS%cg_newton_tolerance
+          ew_eta_prev = CS%cg_tol_current
         else
           ! Safeguarding and oversolving adjustments:
           ! Eisenstat-Walker Choice II safeguard base formula
@@ -1884,7 +1897,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
           elseif (CS%ew_safety==2) then
             ! PETSc choice 3 safeguard (e,g, Chacon 2008, J. Phys: Conf. Ser. 125 012041):
             ! Avoid steep decreases in ew_eta
-            ew_eta  = min(CS%cg_tolerance, max(ew_eta, ew_stol))
+            ew_eta  = min(CS%cg_newton_tolerance, max(ew_eta, ew_stol))
             ! Avoid oversolving in last Newton iters:
             ! The original is technically only applicable for nonlin_solve_err_mode=4:
             ! ew_stol = CS%ew_gamma * ew_resid_first * CS%nonlinear_tolerance / ew_resid
@@ -1893,22 +1906,22 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
             if (CS%ssa_add_rel_resid) then
               ew_stol = min(ew_stol, CS%ew_gamma * norm_tau * CS%rr_nonlinear_tolerance / err_rr)
             endif
-            ew_eta  = min(CS%cg_tolerance, max(ew_eta, ew_stol))
+            ew_eta  = min(CS%cg_newton_tolerance, max(ew_eta, ew_stol))
             write(mesg,*) "ice_shelf_solve_outer: ew_stol = ", ew_stol
             call MOM_mesg(mesg, 8)
           endif
           ew_eta = min(ew_eta,CS%ew_eta_max)
-          CS%cg_tol_newton = ew_eta
+          CS%cg_tol_current = ew_eta
           ew_eta_prev   = ew_eta
           ew_prev_resid = ew_resid
-          write(mesg,*) "ice_shelf_solve_outer: New inner tolerance = ", CS%cg_tol_newton
+          write(mesg,*) "ice_shelf_solve_outer: New inner tolerance = ", CS%cg_tol_current
           call MOM_mesg(mesg, 8)
         endif
       endif
     endif
   enddo
   CS%doing_newton = .false.
-  CS%cg_tol_newton = CS%cg_tolerance
+  CS%cg_tol_current = CS%cg_tolerance
 
   write(mesg,*) "ice_shelf_solve_outer: nonlinear fractional residual = ", err_max/err_init
   call MOM_mesg(mesg)
@@ -2052,7 +2065,7 @@ subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H
   enddo ; enddo
 
   !resid0 = sqrt(reproducing_sum( sum_vec, Is_sum, Ie_sum, Js_sum, Je_sum ))
-  resid0tol2 = CS%cg_tol_newton**2 * reproducing_sum( sum_vec, Is_sum, Ie_sum, Js_sum, Je_sum )
+  resid0tol2 = CS%cg_tol_current**2 * reproducing_sum( sum_vec, Is_sum, Ie_sum, Js_sum, Je_sum )
 
   do J=Jsdq,Jedq ; do I=Isdq,Iedq
     if (CS%umask(I,J) == 1 .AND.(DIAGu(I,J)/=0)) Zu(I,J) = Ru(I,J) / DIAGu(I,J)
@@ -2157,7 +2170,7 @@ subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H
 
    ! D valid region moves in by 1
 
-    !if sqrt(sv3dsums(3)) <= (CS%cg_tolerance * resid0)
+    !if sqrt(sv3dsums(3)) <= (CS%cg_tol_current * resid0)
     if (sv3dsums(3) <= resid0tol2) then
       iters = iter
       conv_flag = 1
@@ -2995,7 +3008,7 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
           stry_n = CS%newton_str_vy(i,j,qpv)
           strsh_n = CS%newton_str_sh(i,j,qpv)
           dstrain_n = (((2.*strx_n + stry_n)*ux) + ((2.*stry_n + strx_n)*vy)) + &
-                      strsh_n * (uy + vx) * 0.5
+                      (strsh_n * (uy + vx) * 0.5)
         endif
 
         ! Basal friction and Newton Jacobian evaluated at this quadrature point (fully grounded cells only).
@@ -3010,15 +3023,17 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
                        (v_curr(I,J) * (xquad(iq) * xquad(jq)))) + &
                       ((v_curr(I,J-1) * (xquad(iq) * xquad(3-jq))) + &
                        (v_curr(I-1,J) * (xquad(3-iq) * xquad(jq))))
-          unorm2_qp = (u_curr_qp**2 + v_curr_qp**2) + eps_vel2_e
+          unorm2_qp = ((u_curr_qp**2) + (v_curr_qp**2)) + eps_vel2_e
           call compute_basal_coef(unorm2_qp, coef_prefactor_e, min_trac_e, fB_e, &
               CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, use_newton, &
               basal_coef_qp, drag_newt_qp)
           ! Apply ground fraction scaling (replaces external scaling of basal_traction)
           basal_coef_qp = basal_coef_qp * CS%ground_frac(i,j)
-          if (use_newton) drag_newt_qp = drag_newt_qp * CS%ground_frac(i,j)
-          ! Inner product u^k_qp . delta_u_qp for the Newton correction.
-          inner_dot_qp = (u_curr_qp * uq) + (v_curr_qp * vq)
+          if (use_newton) then
+            drag_newt_qp = drag_newt_qp * CS%ground_frac(i,j)
+            ! Inner product u^k_qp . delta_u_qp for the Newton correction.
+            inner_dot_qp = (u_curr_qp * uq) + (v_curr_qp * vq)
+          endif
         endif
 
         do jphi=1,2 ; Jtgt = J-2+jphi ; do iphi=1,2 ; Itgt = I-2+iphi
@@ -3032,13 +3047,13 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
           ! Newton viscosity tangent stiffness: 2*(dη/dε_e^2) * (g·δε) * (g·φ_m).
           if (do_newton_visc) then
             if (umask(Itgt,Jtgt) == 1) uret_qp(iphi,jphi,qp) = uret_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * dstrain_n * 2.0 * &
-              ((2.*strx_n + stry_n) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j) + &
-               strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi),qp,i,j))
+              CS%newton_visc_factor(i,j,qpv) * dstrain_n * &
+              (((2.*strx_n + stry_n) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
+               (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
             if (vmask(Itgt,Jtgt) == 1) vret_qp(iphi,jphi,qp) = vret_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * dstrain_n * 2.0 * &
-              (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j) + &
-               (2.*stry_n + strx_n) * Phi(2*(2*(jphi-1)+iphi),qp,i,j))
+              CS%newton_visc_factor(i,j,qpv) * dstrain_n * &
+              ((strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
+               ((2.*stry_n + strx_n) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
           endif
 
           if (float_cond(i,j) == 0 .and. CS%ground_frac(i,j)>0) then
@@ -3170,7 +3185,7 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
         v_delta_loc = (((Phisub(qx,qy,i,j,1,1)*V_delta(1,1)) + (Phisub(qx,qy,i,j,2,2)*V_delta(2,2))) + &
                        ((Phisub(qx,qy,i,j,1,2)*V_delta(1,2)) + (Phisub(qx,qy,i,j,2,1)*V_delta(2,1))))
 
-        unorm2_loc = (u_curr_loc**2 + v_curr_loc**2) + eps_vel2
+        unorm2_loc = ((u_curr_loc**2) + (v_curr_loc**2)) + eps_vel2
         call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
             CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, use_newton, &
             basal_coef_loc, drag_newt_loc)
@@ -3419,7 +3434,7 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
                      (v_curr(I,J) * (xquad(iq) * xquad(jq)))) + &
                     ((v_curr(I,J-1) * (xquad(iq) * xquad(3-jq))) + &
                      (v_curr(I-1,J) * (xquad(3-iq) * xquad(jq))))
-        unorm2_qp = (u_curr_qp**2 + v_curr_qp**2) + eps_vel2_e
+        unorm2_qp = ((u_curr_qp**2) + (v_curr_qp**2)) + eps_vel2_e
         call compute_basal_coef(unorm2_qp, coef_prefactor_e, min_trac_e, fB_e, &
             CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, .true., &
             basal_coef_qp, drag_newt_qp)
@@ -3447,10 +3462,10 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
           ! Newton viscosity diagonal correction: newton_visc_factor * (g . grad_phi_m_u)^2
           ! where grad_phi_m_u = [(2*strx+stry)*Phi_xm + strsh/2*Phi_ym] for u-DOF at node m
           if (do_newton_visc) then
-            dstrain_diag_u = (2.*strx_n + stry_n) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j) + &
-                             strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi),qp,i,j)
+            dstrain_diag_u = ((2.*strx_n + stry_n) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
+                             (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi),qp,i,j))
             u_diag_qp(iphi,jphi,qp) = u_diag_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * 2.0 * dstrain_diag_u**2
+              CS%newton_visc_factor(i,j,qpv) * dstrain_diag_u**2
           endif
 
           if (float_cond(i,j) == 0 .and. CS%ground_frac(i,j)>0) then
@@ -3474,10 +3489,10 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
 
           ! Newton viscosity diagonal correction for v-DOF: uses [strsh/2*Phi_xm + (2*stry+strx)*Phi_ym]
           if (do_newton_visc) then
-            dstrain_diag_v = strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j) + &
-                             (2.*stry_n + strx_n) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)
+            dstrain_diag_v = (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
+                             ((2.*stry_n + strx_n) * Phi(2*(2*(jphi-1)+iphi),qp,i,j))
             v_diag_qp(iphi,jphi,qp) = v_diag_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * 2.0 * dstrain_diag_v**2
+              CS%newton_visc_factor(i,j,qpv) * dstrain_diag_v**2
           endif
 
           if (float_cond(i,j) == 0 .and. CS%ground_frac(i,j)>0) then
@@ -3590,7 +3605,7 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
         v_curr_loc = (((Phisub(qx,qy,i,j,1,1)*V_curr(1,1)) + (Phisub(qx,qy,i,j,2,2)*V_curr(2,2))) + &
                       ((Phisub(qx,qy,i,j,1,2)*V_curr(1,2)) + (Phisub(qx,qy,i,j,2,1)*V_curr(2,1))))
 
-        unorm2_loc = (u_curr_loc**2 + v_curr_loc**2) + eps_vel2
+        unorm2_loc = ((u_curr_loc**2) + (v_curr_loc**2)) + eps_vel2
         call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
             CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, .true., &
             basal_coef_loc, drag_newt_loc)
@@ -3856,7 +3871,7 @@ subroutine calc_shelf_visc(CS, ISS, G, US, u_shlf, v_shlf)
         CS%newton_str_sh(i,j,1) = uy + vx
         CS%newton_visc_factor(i,j,1) = 0.0
         if (CS%ice_visc(i,j,1) > CS%min_ice_visc * (G%areaT(i,j) * max(ISS%h_shelf(i,j),CS%min_h_shelf))) then
-          CS%newton_visc_factor(i,j,1) = (0.5*(1./n_g - 1.) / &
+          CS%newton_visc_factor(i,j,1) = ((1./n_g - 1.) / &
               (((ux**2) + (vy**2)) + ((ux*vy) + 0.25*((uy+vx)**2)) + eps_min**2)) * &
               CS%ice_visc(i,j,1)
         endif
@@ -3893,11 +3908,11 @@ subroutine calc_shelf_visc(CS, ISS, G, US, u_shlf, v_shlf)
               (US%Pa_to_RL2_T2*US%s_to_T),CS%min_ice_visc)  ! Rescale after the fractional power law.
           ! Store Newton tangent stiffness data at each quadrature point.
           CS%newton_str_ux(i,j,2*(jq-1)+iq) = ux ; CS%newton_str_vy(i,j,2*(jq-1)+iq) = vy
-          CS%newton_str_sh(i,j,2*(jq-1)+iq) = uy + vx
+          CS%newton_str_sh(i,j,2*(jq-1)+iq) = (uy + vx)
           CS%newton_visc_factor(i,j,2*(jq-1)+iq) = 0.0
           if (CS%ice_visc(i,j,2*(jq-1)+iq) > &
               CS%min_ice_visc * (G%areaT(i,j) * max(ISS%h_shelf(i,j),CS%min_h_shelf))) then
-            CS%newton_visc_factor(i,j,2*(jq-1)+iq) = (0.5*(1./n_g - 1.) / &
+            CS%newton_visc_factor(i,j,2*(jq-1)+iq) = ((1./n_g - 1.) / &
                 (((ux**2) + (vy**2)) + ((ux*vy) + 0.25*((uy+vx)**2)) + eps_min**2)) * &
                 CS%ice_visc(i,j,2*(jq-1)+iq)
           endif
