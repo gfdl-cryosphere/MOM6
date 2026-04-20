@@ -149,6 +149,10 @@ type, public :: ice_shelf_dyn_CS ; private
                                                 !! 4 quadrature points surrounding the cell vertices [L-1 ~> m-1].
   real, pointer, dimension(:,:,:) :: PhiC => NULL()  !< The gradients of bilinear basis elements at 1 cell-centered
                                                 !! quadrature point per cell [L-1 ~> m-1].
+  real, pointer, dimension(:,:,:) :: Jac => NULL()   !< Jacobian determinant |J_q| = a_q*d_q of the element
+                                                !! mapping at each of the 4 Gaussian quadrature points [L2 ~> m2].
+                                                !! Equal to G%areaT only for rectangular elements; differs when
+                                                !! opposite cell edges have unequal lengths (non-rectangular quads).
   real, pointer, dimension(:,:,:,:,:,:) :: Phisub => NULL() !< Quadrature structure weights at subgridscale
                                                 !!  locations for finite element calculations [nondim]
   integer :: OD_rt_counter = 0 !< A counter of the number of contributions to OD_rt.
@@ -792,9 +796,10 @@ subroutine initialize_ice_shelf_dyn(param_file, Time, ISS, CS, G, US, diag, new_
     endif
 
     allocate(CS%Phi(1:8,1:4,isd:ied,jsd:jed), source=0.0)
+    allocate(CS%Jac(1:4,isd:ied,jsd:jed), source=0.0)
     do j=G%jsd,G%jed ; do i=G%isd,G%ied
-      call bilinear_shape_fn_grid(G, i, j, CS%Phi(:,:,i,j))
-    enddo ; enddo
+      call bilinear_shape_fn_grid(G, i, j, CS%Phi(:,:,i,j), CS%Jac(:,i,j))
+    enddo; enddo
 
     if (CS%GL_regularize) then
       allocate(CS%Phisub(2,2,CS%n_sub_regularize,CS%n_sub_regularize,2,2), source=0.0)
@@ -3644,6 +3649,7 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
   real :: eps_vel2_e     ! Velocity regularization squared for current element [L2 T-2 ~> m2 s-2]
   real :: min_trac_e     ! min_basal_traction * areaT for current element [R L2 Z T-1 ~> kg s-1]
   real :: fB_e           ! Pre-computed Coulomb fB for element; 0 for Weertman [(T L-1)^CF_PostPeak]
+  real :: jac_wt  ! Per-quadrature-point metric correction |J_q|/areaT [nondim]
   integer :: iq, jq, iphi, jphi, i, j, ilq, jlq, Itgt, Jtgt, qp, qpv
   logical :: visc_qp4
   logical :: use_newton  ! Whether to apply Newton tangent stiffness corrections
@@ -3751,22 +3757,26 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
           endif
         endif
 
+        ! Ratio |J_q|/areaT corrects the uniform-area weight baked into ice_visc for
+        ! non-rectangular elements where opposite cell edges have unequal lengths.
+        jac_wt = CS%Jac(qp,i,j) * G%IareaT(i,j)
+
         do jphi=1,2 ; Jtgt = J-2+jphi ; do iphi=1,2 ; Itgt = I-2+iphi
-          if (umask(Itgt,Jtgt) == 1) uret_qp(iphi,jphi,qp) = ice_visc(i,j,qpv) * &
+          if (umask(Itgt,Jtgt) == 1) uret_qp(iphi,jphi,qp) = jac_wt * ice_visc(i,j,qpv) * &
             (((4*ux+2*vy) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
             ((uy+vx) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
-          if (vmask(Itgt,Jtgt) == 1) vret_qp(iphi,jphi,qp) = ice_visc(i,j,qpv) * &
+          if (vmask(Itgt,Jtgt) == 1) vret_qp(iphi,jphi,qp) = jac_wt * ice_visc(i,j,qpv) * &
             (((uy+vx) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
             ((4*vy+2*ux) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
 
           ! Newton viscosity tangent stiffness: 2*(dη/dε_e^2) * (g·δε) * (g·φ_m).
           if (do_newton_visc) then
             if (umask(Itgt,Jtgt) == 1) uret_qp(iphi,jphi,qp) = uret_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * dstrain_n * &
+              jac_wt * CS%newton_visc_factor(i,j,qpv) * dstrain_n * &
               (((2.*strx_n + stry_n) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
                (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
             if (vmask(Itgt,Jtgt) == 1) vret_qp(iphi,jphi,qp) = vret_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * dstrain_n * &
+              jac_wt * CS%newton_visc_factor(i,j,qpv) * dstrain_n * &
               ((strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
                ((2.*stry_n + strx_n) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
           endif
@@ -3776,16 +3786,16 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
             jlq = 1 ; if (jq == jphi) jlq = 2
             ! Picard basal drag: C*|u^k|^(m-1) * δu evaluated at quadrature point, weighted by φ_m
             if (umask(Itgt,Jtgt) == 1) uret_qp(iphi,jphi,qp) = uret_qp(iphi,jphi,qp) + &
-              basal_coef_qp * uq * (xquad(ilq) * xquad(jlq))
+              (jac_wt * basal_coef_qp * uq * (xquad(ilq) * xquad(jlq)))
             if (vmask(Itgt,Jtgt) == 1) vret_qp(iphi,jphi,qp) = vret_qp(iphi,jphi,qp) + &
-              basal_coef_qp * vq * (xquad(ilq) * xquad(jlq))
+              (jac_wt * basal_coef_qp * vq * (xquad(ilq) * xquad(jlq)))
             ! Newton basal drag: pointwise Jacobian of the Picard residual.
             ! Tangent stiffness = basal_coef_qp*I + drag_newt_qp * u^k_qp ⊗ u^k_qp
             if (use_newton) then
               if (umask(Itgt,Jtgt) == 1) uret_qp(iphi,jphi,qp) = uret_qp(iphi,jphi,qp) + &
-                drag_newt_qp * u_curr_qp * inner_dot_qp * (xquad(ilq) * xquad(jlq))
+                jac_wt * drag_newt_qp * u_curr_qp * inner_dot_qp * (xquad(ilq) * xquad(jlq))
               if (vmask(Itgt,Jtgt) == 1) vret_qp(iphi,jphi,qp) = vret_qp(iphi,jphi,qp) + &
-                drag_newt_qp * v_curr_qp * inner_dot_qp * (xquad(ilq) * xquad(jlq))
+                jac_wt * drag_newt_qp * v_curr_qp * inner_dot_qp * (xquad(ilq) * xquad(jlq))
             endif
           endif
         enddo ; enddo
@@ -3814,7 +3824,8 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
         call CG_action_subgrid_basal(CS, G, US, Phisub, Hcell, &
                                      u_curr(I-1:I,J-1:J), v_curr(I-1:I,J-1:J), &
                                      u_shlf(I-1:I,J-1:J), v_shlf(I-1:I,J-1:J), &
-                                     bathyT(i,j), dens_ratio, i, j, fB_e, use_newton, Usub, Vsub)
+                                     bathyT(i,j), dens_ratio, i, j, fB_e, use_newton, Usub, Vsub, &
+                                     G%dxCv(i,j-1), G%dxCv(i,j), G%dyCu(i-1,j), G%dyCu(i,j), G%IareaT(i,j))
         if (umask(I-1,J-1) == 1) uret_b(I-1,J-1,4) = uret_b(I-1,J-1,4) + Usub(1,1)
         if (umask(I-1,J  ) == 1) uret_b(I-1,J  ,2) = uret_b(I-1,J  ,2) + Usub(1,2)
         if (umask(I  ,J-1) == 1) uret_b(I  ,J-1,3) = uret_b(I  ,J-1,3) + Usub(2,1)
@@ -3837,7 +3848,8 @@ end subroutine CG_action
 !! Evaluates basal friction (Picard and Newton Jacobian) at each grounded sub-quadrature point.
 !! The sub-qp flotation test accounts for partial grounding; no external ground_frac scaling needed.
 subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta, V_delta, &
-    bathyT, dens_ratio, i_elem, j_elem, fB_e, use_newton, Ucontr, Vcontr)
+                                   bathyT, dens_ratio, i_elem, j_elem, fB_e, use_newton, Ucontr, Vcontr, &
+                                   dxCv_S, dxCv_N, dyCu_W, dyCu_E, IareaT)
   type(ice_shelf_dyn_CS), intent(in) :: CS      !< Ice shelf control structure
   type(ocean_grid_type),  intent(in) :: G       !< The grid structure
   type(unit_scale_type),  intent(in) :: US      !< Unit conversion factors
@@ -3855,6 +3867,11 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
   logical,                intent(in) :: use_newton !< If true, include Newton basal drag correction
   real, dimension(2,2),   intent(out) :: Ucontr !< Nodal u-contributions with friction applied [R L3 Z T-2 ~> kg m s-2]
   real, dimension(2,2),   intent(out) :: Vcontr !< Nodal v-contributions with friction applied [R L3 Z T-2 ~> kg m s-2]
+  real,                   intent(in) :: dxCv_S !< The cell width at the southern (v-point) edge [L ~> m]
+  real,                   intent(in) :: dxCv_N !< The cell width at the northern (v-point) edge [L ~> m]
+  real,                   intent(in) :: dyCu_W !< The cell height at the western (u-point) edge [L ~> m]
+  real,                   intent(in) :: dyCu_E !< The cell height at the eastern (u-point) edge [L ~> m]
+  real,                   intent(in) :: IareaT !< The inverse of the cell area at the tracer point [L-2 ~> m-2]
 
   real, dimension(SIZE(Phisub,3),SIZE(Phisub,3),2,2) :: Ucontr_sub, Vcontr_sub
   real, dimension(2,2,2,2) :: U_qp_nd, V_qp_nd  ! Per-qp nodal contributions (qx,qy,m,n)
@@ -3873,6 +3890,8 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
   real :: coef_prefactor ! Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
   real :: min_trac_area  ! Minimum area-integrated traction floor [R L2 Z T-1 ~> kg s-1]
   real :: eps_vel2       ! Velocity regularization squared [L2 T-2 ~> m2 s-2]
+  real :: jac_sub_wt ! Per-sub-cell-QP metric correction |J_sub|/areaT [nondim]
+  real :: a, d      ! Interpolated cell-edge spacings at the sub-cell QP [L ~> m]
   real :: subarea        ! Fractional sub-cell area [nondim]
   integer :: nsub, i, j, qx, qy, m, n
 
@@ -3906,9 +3925,19 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
             basal_coef_loc, drag_newt_loc)
         inner_dot_loc = (u_curr_loc * u_delta_loc) + (v_curr_loc * v_delta_loc)
 
+        ! Interpolate cell-edge metrics to the sub-cell QP using the bilinear shape function values
+        ! from bilinear_shape_functions_subgrid.  Marginal sums of Phisub give the interpolation
+        ! weights: sum over k=1 nodes gives (1-y); k=2 gives y; l=1 gives (1-x); l=2 gives x.
+        ! This is analogous to jac_wt = CS%Jac(qp,i,j) * G%IareaT(i,j) in the regular routines.
+        a = (dxCv_S * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,2,1))) + &  ! (1-y) * dxCv_S
+            (dxCv_N * (Phisub(qx,qy,i,j,1,2) + Phisub(qx,qy,i,j,2,2)))        ! + y * dxCv_N
+        d = (dyCu_W * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,1,2))) + &  ! (1-x) * dyCu_W
+            (dyCu_E * (Phisub(qx,qy,i,j,2,1) + Phisub(qx,qy,i,j,2,2)))        ! + x * dyCu_E
+        jac_sub_wt = 0.25 * subarea * (a * d) * IareaT
+
         do n=1,2 ; do m=1,2
           phi_mn  = Phisub(qx,qy,i,j,m,n)
-          contrib = (subarea * 0.25) * phi_mn
+          contrib = jac_sub_wt * phi_mn
           ! Picard: friction matrix applied to search direction δu
           U_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc * u_delta_loc)
           V_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc * v_delta_loc)
@@ -4079,6 +4108,7 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
 ! returns the diagonal entries of the matrix for a Jacobi preconditioning
 
   real :: ux, uy, vx, vy ! Interpolated weight gradients [L-1 ~> m-1]
+  real :: jac_wt  ! Per-quadrature-point metric correction |J_q|/areaT [nondim]
   real :: strx_n, stry_n, strsh_n  ! Newton viscosity strain rates [T-1 ~> s-1]
   real :: dstrain_diag_u, dstrain_diag_v  ! Newton viscosity diagonal correction factors [T-1 L-1 ~> s-1 m-1]
   real :: phi_m_sq  ! Squared basis function value at quadrature point [nondim]
@@ -4132,7 +4162,11 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
       qp = 2*(jq-1)+iq !current quad point
       if (visc_qp4) qpv = qp !current quad point for viscosity
 
-      ! Pre-compute Newton viscosity strain data for this quadrature point
+      ! Ratio |J_q|/areaT corrects the uniform-area weight baked into ice_visc for
+      ! non-rectangular elements where opposite cell edges have unequal lengths.
+      jac_wt = CS%Jac(qp,i,j) * G%IareaT(i,j)
+
+      ! Pre-compute Newton strain data for this QP (for viscosity diagonal correction)
       if (do_newton_visc) then
         strx_n = CS%newton_str_ux(i,j,qpv)
         stry_n = CS%newton_str_vy(i,j,qpv)
@@ -4170,7 +4204,7 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
           vx = 0.
           vy = 0.
 
-          u_diag_qp(iphi,jphi,qp) = &
+          u_diag_qp(iphi,jphi,qp) = jac_wt * &
             ice_visc(i,j,qpv) * (((4*ux+2*vy) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
             ((uy+vx) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
 
@@ -4180,14 +4214,14 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
             dstrain_diag_u = ((2.*strx_n + stry_n) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
                              (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi),qp,i,j))
             u_diag_qp(iphi,jphi,qp) = u_diag_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * dstrain_diag_u**2
+              jac_wt * CS%newton_visc_factor(i,j,qpv) * dstrain_diag_u**2
           endif
 
           if (float_cond(i,j) == 0 .and. CS%ground_frac(i,j)>0) then
             ! Picard diagonal: basal_coef_qp * phi_m^2; Newton diagonal adds drag_newt_qp * u^k_qp^2 * phi_m^2.
-            u_diag_qp(iphi,jphi,qp) = u_diag_qp(iphi,jphi,qp) + basal_coef_qp * phi_m_sq
+            u_diag_qp(iphi,jphi,qp) = u_diag_qp(iphi,jphi,qp) + jac_wt * basal_coef_qp * phi_m_sq
             if (CS%doing_newton) &
-              u_diag_qp(iphi,jphi,qp) = u_diag_qp(iphi,jphi,qp) + drag_newt_qp * u_curr_qp**2 * phi_m_sq
+              u_diag_qp(iphi,jphi,qp) = u_diag_qp(iphi,jphi,qp) + jac_wt * drag_newt_qp * u_curr_qp**2 * phi_m_sq
           endif
         endif
 
@@ -4198,7 +4232,7 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
           ux = 0.
           uy = 0.
 
-          v_diag_qp(iphi,jphi,qp) = &
+          v_diag_qp(iphi,jphi,qp) = jac_wt *  &
             ice_visc(i,j,qpv) * (((uy+vx) * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
             ((4*vy+2*ux) * Phi(2*(2*(jphi-1)+iphi),qp,i,j)))
 
@@ -4207,13 +4241,13 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
             dstrain_diag_v = (strsh_n * 0.5 * Phi(2*(2*(jphi-1)+iphi)-1,qp,i,j)) + &
                              ((2.*stry_n + strx_n) * Phi(2*(2*(jphi-1)+iphi),qp,i,j))
             v_diag_qp(iphi,jphi,qp) = v_diag_qp(iphi,jphi,qp) + &
-              CS%newton_visc_factor(i,j,qpv) * dstrain_diag_v**2
+              jac_wt * CS%newton_visc_factor(i,j,qpv) * dstrain_diag_v**2
           endif
 
           if (float_cond(i,j) == 0 .and. CS%ground_frac(i,j)>0) then
-            v_diag_qp(iphi,jphi,qp) = v_diag_qp(iphi,jphi,qp) + basal_coef_qp * phi_m_sq
+            v_diag_qp(iphi,jphi,qp) = v_diag_qp(iphi,jphi,qp) + jac_wt * basal_coef_qp * phi_m_sq
             if (CS%doing_newton) &
-              v_diag_qp(iphi,jphi,qp) = v_diag_qp(iphi,jphi,qp) + drag_newt_qp * v_curr_qp**2 * phi_m_sq
+              v_diag_qp(iphi,jphi,qp) = v_diag_qp(iphi,jphi,qp) + jac_wt * drag_newt_qp * v_curr_qp**2 * phi_m_sq
           endif
         endif
       enddo ; enddo
@@ -4242,7 +4276,9 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
       Hcell(:,:) = H_node(I-1:I,J-1:J)
       call CG_diagonal_subgrid_basal(CS, G, US, Phisub, Hcell, &
           u_curr(I-1:I,J-1:J), v_curr(I-1:I,J-1:J), &
-          CS%bed_elev(i,j), dens_ratio, i, j, fB_e, u_diag_sub, v_diag_sub)
+          CS%bed_elev(i,j), dens_ratio, i, j, fB_e, u_diag_sub, v_diag_sub, &
+          G%dxCv(i,j-1), G%dxCv(i,j), G%dyCu(i-1,j), G%dyCu(i,j), G%IareaT(i,j))
+
       if (CS%umask(I-1,J-1)==1) u_diag_b(I-1,J-1,4) = u_diag_b(I-1,J-1,4) + u_diag_sub(1,1)
       if (CS%umask(I-1,J  )==1) u_diag_b(I-1,J  ,2) = u_diag_b(I-1,J  ,2) + u_diag_sub(1,2)
       if (CS%umask(I  ,J-1)==1) u_diag_b(I  ,J-1,3) = u_diag_b(I  ,J-1,3) + u_diag_sub(2,1)
@@ -4266,7 +4302,8 @@ end subroutine matrix_diagonal
 !! because the Newton term uses u^2 for the u-block and v^2 for the v-block.
 !! The sub-qp flotation test handles partial grounding; no external ground_frac scaling needed.
 subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, &
-    bathyT, dens_ratio, i_elem, j_elem, fB_e, u_diag, v_diag)
+                                     bathyT, dens_ratio, i_elem, j_elem, fB_e, u_diag, v_diag, &
+                                     dxCv_S, dxCv_N, dyCu_W, dyCu_E, IareaT)
   type(ice_shelf_dyn_CS), intent(in) :: CS      !< Ice shelf control structure
   type(ocean_grid_type),  intent(in) :: G       !< The grid structure
   type(unit_scale_type),  intent(in) :: US      !< Unit conversion factors
@@ -4281,6 +4318,11 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
   real,                   intent(in) :: fB_e    !< Element Coulomb parameter fB; 0 for Weertman [(T L-1)^CF_PostPeak]
   real, dimension(2,2),   intent(out) :: u_diag !< Nodal u-diagonal entries [R L2 Z T-1 ~> kg s-1]
   real, dimension(2,2),   intent(out) :: v_diag !< Nodal v-diagonal entries [R L2 Z T-1 ~> kg s-1]
+  real,                   intent(in)  :: dxCv_S !< The cell width at the southern (v-point) edge [L ~> m]
+  real,                   intent(in)  :: dxCv_N !< The cell width at the northern (v-point) edge [L ~> m]
+  real,                   intent(in)  :: dyCu_W !< The cell height at the western (u-point) edge [L ~> m]
+  real,                   intent(in)  :: dyCu_E !< The cell height at the eastern (u-point) edge [L ~> m]
+  real,                   intent(in)  :: IareaT !< The inverse of the cell area at the tracer point [L-2 ~> m-2]
 
   real, dimension(SIZE(Phisub,3),SIZE(Phisub,3),2,2) :: u_diag_sub, v_diag_sub
   real, dimension(2,2,2,2) :: u_diag_qp_nd, v_diag_qp_nd  ! Per-qp nodal diagonal entries (qx,qy,m,n),
@@ -4296,6 +4338,8 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
   real :: coef_prefactor ! Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
   real :: min_trac_area  ! Minimum area-integrated traction floor [R L2 Z T-1 ~> kg s-1]
   real :: eps_vel2       ! Velocity regularization squared [L2 T-2 ~> m2 s-2]
+  real :: jac_sub_wt ! Per-sub-cell-QP metric correction |J_sub|/areaT [nondim]
+  real :: a, d      ! Interpolated cell-edge spacings at the sub-cell QP [L ~> m]
   real :: subarea        ! Fractional sub-cell area [nondim]
   integer :: nsub, i, j, qx, qy, m, n
 
@@ -4324,10 +4368,19 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
         call compute_basal_coef(unorm2_loc, coef_prefactor, min_trac_area, fB_e, &
             CS%n_basal_fric, CS%CoulombFriction, CS%CF_PostPeak, US%L_T_to_m_s, .true., &
             basal_coef_loc, drag_newt_loc)
+        ! Interpolate cell-edge metrics to the sub-cell QP using the bilinear shape function values
+        ! from bilinear_shape_functions_subgrid.  Marginal sums of Phisub give the interpolation
+        ! weights: sum over k=1 nodes gives (1-y); k=2 gives y; l=1 gives (1-x); l=2 gives x.
+        ! This is analogous to jac_wt = CS%Jac(qp,i,j) * G%IareaT(i,j) in the regular routines.
+        a = dxCv_S * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,2,1)) + &  ! (1-y) * dxCv_S
+          dxCv_N * (Phisub(qx,qy,i,j,1,2) + Phisub(qx,qy,i,j,2,2))        ! + y * dxCv_N
+        d = dyCu_W * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,1,2)) + &  ! (1-x) * dyCu_W
+          dyCu_E * (Phisub(qx,qy,i,j,2,1) + Phisub(qx,qy,i,j,2,2))        ! + x * dyCu_E
+        jac_sub_wt = 0.25 * subarea * (a * d) * IareaT
 
         do n=1,2 ; do m=1,2
           phi_mn_sq = Phisub(qx,qy,i,j,m,n)**2
-          contrib   = (subarea * 0.25) * phi_mn_sq
+          contrib   = jac_sub_wt * phi_mn_sq
           ! Picard diagonal + Newton diagonal (u_curr^2 for u-block, v_curr^2 for v-block)
           if (CS%doing_newton) then
             u_diag_qp_nd(qx,qy,m,n) = contrib * (basal_coef_loc + drag_newt_loc * u_curr_loc**2)
@@ -4916,12 +4969,14 @@ end subroutine bilinear_shape_functions
 !> This subroutine calculates the gradients of bilinear basis elements that are centered at the
 !! vertices of the cell using a locally orthogoal MOM6 grid.  Values are calculated at
 !! points of gaussian quadrature.
-subroutine bilinear_shape_fn_grid(G, i, j, Phi)
+subroutine bilinear_shape_fn_grid(G, i, j, Phi, Jac)
   type(ocean_grid_type), intent(in)    :: G  !< The grid structure used by the ice shelf.
   integer,               intent(in)    :: i   !< The i-index in the grid to work on.
   integer,               intent(in)    :: j   !< The j-index in the grid to work on.
   real, dimension(8,4),  intent(inout) :: Phi !< The gradients of bilinear basis elements at Gaussian
                                               !! quadrature points surrounding the cell vertices [L-1 ~> m-1].
+  real, dimension(4), optional, intent(out) :: Jac !< Jacobian determinant |J_q| = a_q*d_q at each
+                                              !! Gaussian quadrature point [L2 ~> m2].
 
 ! This subroutine calculates the gradients of bilinear basis elements that
 ! that are centered at the vertices of the cell.  The values are calculated at
@@ -4975,6 +5030,7 @@ subroutine bilinear_shape_fn_grid(G, i, j, Phi)
       Phi(2*node,qpoint)   = ( (a * (2 * ynode - 3)) * xexp ) / (a*d)
 
     enddo
+    if (present(Jac)) Jac(qpoint) = a * d
   enddo
 
 end subroutine bilinear_shape_fn_grid
@@ -5281,13 +5337,16 @@ subroutine ice_shelf_dyn_end(CS)
 
   deallocate(CS%u_shelf, CS%v_shelf)
   deallocate(CS%taudx_shelf, CS%taudy_shelf)
+  deallocate(CS%sx_shelf, CS%sy_shelf)
   deallocate(CS%t_shelf, CS%tmask)
   deallocate(CS%u_bdry_val, CS%v_bdry_val)
   deallocate(CS%u_face_mask, CS%v_face_mask)
+  deallocate(CS%u_flux_bdry_val, CS%v_flux_bdry_val)
   deallocate(CS%umask, CS%vmask)
   deallocate(CS%u_face_mask_bdry, CS%v_face_mask_bdry)
   deallocate(CS%h_bdry_val)
   deallocate(CS%float_cond)
+  if (associated(CS%calve_mask)) deallocate(CS%calve_mask)
 
   deallocate(CS%ice_visc, CS%AGlen_visc)
   deallocate(CS%newton_visc_factor, CS%newton_str_ux, CS%newton_str_vy, CS%newton_str_sh)
@@ -5297,6 +5356,10 @@ subroutine ice_shelf_dyn_end(CS)
   deallocate(CS%OD_rt, CS%OD_av)
   deallocate(CS%t_bdry_val, CS%bed_elev)
   deallocate(CS%ground_frac, CS%ground_frac_rt)
+  if (associated(CS%Jac)) deallocate(CS%Jac)
+  if (associated(CS%Phi)) deallocate(CS%Phi)
+  if (associated(CS%Phisub)) deallocate(CS%Phisub)
+  if (associated(CS%PhiC)) deallocate(CS%PhiC)
 
   deallocate(CS)
 
