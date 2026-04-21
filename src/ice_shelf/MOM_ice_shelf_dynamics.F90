@@ -214,8 +214,8 @@ type, public :: ice_shelf_dyn_CS ; private
   real :: T_shelf_missing   !< An ice shelf temperature to use where there is no ice shelf [C ~> degC]
   real :: cg_tolerance !< For Picard iterations, the tolerance in the CG solver, relative to initial residual, that
                        !! determines when to stop the conjugate gradient iterations [nondim].
-  real :: cg_newton_tolerance !< For inexact Newton iterations, the initial tolerance in the CG solver, relative to initial
-                              !!  residual, that determines when to stop the conjugate gradient iterations [nondim].
+  real :: cg_newton_tolerance !< For inexact Newton iterations, the initial tolerance in the CG solver, relative to
+                              !!  initial residual, that determines when to stop the CG iterations [nondim].
   real :: cg_tol_current !< Working CG tolerance for the current inner solve [nondim].
   real :: nonlinear_tolerance !< The fractional nonlinear tolerance, relative to the initial error,
                               !! that sets when to stop the iterative velocity solver [nondim]
