@@ -1575,7 +1575,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
 
   ! Determine the loop limits for sums, bearing in mind that the arrays will be starting at 1.
   ! Includes the edge of the tile is at the western/southern bdry (if symmetric)
-  if (CS%nonlin_solve_err_mode >= 3 .or. CS%newton_adapt_cg_tol) then
+  if (CS%nonlin_solve_err_mode >= 3 .or. CS%ssa_add_rel_resid) then
     if ((isc+G%idg_offset==G%isg) .and. (.not. CS%reentrant_x)) then
       Is_sum = Iscq + (1-Isdq) ; Iscq_sv = Iscq
     else
