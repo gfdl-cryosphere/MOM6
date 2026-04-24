@@ -1893,6 +1893,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
         call pass_var(CS%newton_str_sh, G%domain, complete=.false.)
         call pass_var(CS%newton_visc_factor, G%domain, complete=.true.)
         call pass_vector(CS%newton_str_ux, CS%newton_str_vy, G%domain, TO_ALL, AGRID)
+        CS%cg_tol_current = CS%cg_newton_tolerance
       endif
 
       ! Inexact Newton: Adapt inner solver tolerance to prevent oversolving
@@ -1901,10 +1902,13 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
       ! consistent with the inner solver's convergence check (sv3dsums(3)).
       ! The first Newton step uses the standard cg_tolerance.
       if (CS%doing_newton .and. CS%newton_adapt_cg_tol) then
-        if (CS%nonlin_solve_err_mode == 4) then
+        !calculate residual needed for EW; some convergence criteria already did this
+        if (CS%nonlin_solve_err_mode >= 4) then
           ew_resid=err_max
+        elseif (CS%ssa_add_rel_resid) then
+          ew_resid=err_rr
         else
-          if (CS%nonlin_solve_err_mode /= 1) then
+          if (.not. calc_Au_for_convergence) then
             Au(:,:) = 0 ; Av(:,:) = 0
             call CG_action(CS, Au, Av, u_shlf, v_shlf, CS%Phi, CS%Phisub, CS%umask, CS%vmask, ISS%hmask, &
               H_node, CS%ice_visc, CS%float_cond, CS%bed_elev, u_shlf, v_shlf, &
@@ -1918,6 +1922,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
           ew_resid = sqrt(reproducing_sum(Normvec, Is_sum, Ie_sum, Js_sum, Je_sum, &
             unscale=((US%RZ_to_kg_m2*US%L_to_m)*US%L_T_to_m_s**2)**2))
         endif
+
         if (ew_prev_resid == 0.0) then
           ! First Newton iteration: seed residuals; use initial newton cg_tolerance this step
           ew_prev_resid  = ew_resid
