@@ -1833,7 +1833,7 @@ subroutine ice_shelf_solve_inner(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, H
         IDIAGu, IDIAGv     ! Reciprocal diagonals [R-1 L-2 Z-1 T ~> kg-1 s]
   real    :: rhoi_rhow     ! The density of ice divided by a typical water density [nondim]
   real    :: resid_scale   ! A scaling factor for redimensionalizing the global residuals
-                           ! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+                           ! [T3 kg m2 R-1 Z-1 L-4 s-3 ~> 1]
   integer :: Is_sum, Js_sum, Ie_sum, Je_sum ! Loop bounds for global sums or arrays starting at 1.
   integer :: Iscq_sv, Jscq_sv ! Starting loop bound for sum_vec arrays
   integer :: I, J
@@ -1958,7 +1958,7 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
                           intent(in)    :: hmask !< Ice shelf coverage mask
   real,                   intent(in)    :: rhoi_rhow !< Ice-to-ocean density ratio [nondim]
   real,                   intent(in)    :: resid_scale !< Scaling for inner products
-                                                       !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+                                                       !! [T3 kg m2 R-1 Z-1 L-4 s-3 ~> 1]
   real, dimension(8,4,SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: Phi !< Basis element gradients at quadrature points [L-1 ~> m-1]
   real, dimension(:,:,:,:,:,:), &
@@ -1991,7 +1991,7 @@ subroutine ice_shelf_solve_inner_CG(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   real    :: rho_old     ! The preconditioned residual inner product Z·R from the previous CG
                          ! iteration, scaled by resid_scale [kg m2 s-3]
   real    :: resid2_scale ! A scaling factor for redimensionalizing the global squared residuals
-                         ! [R2 L6 Z2 T-4 ~> m2 kg2 s-4]
+                          ! [T4 kg2 m2 R-2 Z-2 L-6 s-4 ~> 1]
   integer :: cg_halo     ! Number of halo vertices to include during a CG iteration
   integer :: max_cg_halo ! Maximum possible number of halo vertices to include in the CG iterations
   integer :: iter, i, j, isc, iec, jsc, jec, is, js, ie, je, is2, ie2, js2, je2
@@ -2182,7 +2182,7 @@ subroutine ice_shelf_solve_inner_MINRES(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, A
                           intent(in)    :: hmask !< Ice shelf coverage mask
   real,                   intent(in)    :: rhoi_rhow !< Ice-to-ocean density ratio [nondim]
   real,                   intent(in)    :: resid_scale !< Scaling for inner products
-                                                       !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+                                                       !! [T3 kg m2 R-1 Z-1 L-4 s-3 ~> 1]
   real, dimension(8,4,SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: Phi !< Basis element gradients at quadrature points [L-1 ~> m-1]
   real, dimension(:,:,:,:,:,:), &
@@ -2418,7 +2418,7 @@ subroutine ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
                           intent(in)    :: hmask !< Ice shelf coverage mask
   real,                   intent(in)    :: rhoi_rhow !< Ice-to-ocean density ratio [nondim]
   real,                   intent(in)    :: resid_scale !< Scaling for inner products
-                                           !! [L T-1 ~> m s-1] [R L3 Z T-2 ~> m kg s-2]
+                                                       !! [T3 kg m2 R-1 Z-1 L-4 s-3 ~> 1]
   real, dimension(8,4,SZDI_(G),SZDJ_(G)), &
                           intent(in)    :: Phi !< Basis element gradients at quadrature points [L-1 ~> m-1]
   real, dimension(:,:,:,:,:,:), &
@@ -2452,7 +2452,7 @@ subroutine ice_shelf_solve_inner_CR(CS, G, US, u_shlf, v_shlf, RHSu, RHSv, Au, A
   real    :: sv3dsums(2)  ! Component sums from reproducing_sum
                           ! sv3dsums(1): r^2 or z·q [kg2 m2 s-4 or kg m2 s-3] (context-dependent)
                           ! sv3dsums(2): z·w or q·M^-1 q [kg m2 s-3]
-  real    :: resid2_scale ! Scaling for squared-stress inner products [R2 L6 Z2 T-4 ~> m2 kg2 s-4]
+  real    :: resid2_scale ! Scaling for squared-stress inner products [T4 kg2 m2 R-2 Z-2 L-6 s-4 ~> 1]
   integer :: iter, i, j, isc, iec, jsc, jec
   integer :: Isdq, Iedq, Jsdq, Jedq, Iscq, Iecq, Jscq, Jecq
 
