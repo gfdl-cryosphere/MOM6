@@ -3884,7 +3884,7 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
   real :: v_delta_loc   ! Search direction δv interpolated to sub-qp [L T-1 ~> m s-1]
   real :: unorm2_loc    ! Regularized |u^k|^2 at sub-qp [L2 T-2 ~> m2 s-2]
   real :: basal_coef_loc ! Picard friction coefficient at sub-qp [R L2 Z T-1 ~> kg s-1]
-  real :: drag_newt_loc  ! Newton drag coefficient at sub-qp [R Z T-1 ~> kg m-2 s-1]
+  real :: drag_newt_loc  ! Newton drag coefficient at sub-qp [R Z T ~> kg m-2 s]
   real :: inner_dot_loc  ! u^k · δu inner product at sub-qp [L2 T-2 ~> m2 s-2]
   real :: phi_mn         ! Basis function value at sub-qp [nondim]
   real :: contrib        ! Quadrature weight contribution [nondim]
@@ -3931,9 +3931,9 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
         ! weights: sum over k=1 nodes gives (1-y); k=2 gives y; l=1 gives (1-x); l=2 gives x.
         ! This is analogous to jac_wt = CS%Jac(qp,i,j) * G%IareaT(i,j) in the regular routines.
         a = (dxCv_S * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,2,1))) + &  ! (1-y) * dxCv_S
-            (dxCv_N * (Phisub(qx,qy,i,j,1,2) + Phisub(qx,qy,i,j,2,2)))        ! + y * dxCv_N
+            (dxCv_N * (Phisub(qx,qy,i,j,1,2) + Phisub(qx,qy,i,j,2,2)))      !  + y  * dxCv_N
         d = (dyCu_W * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,1,2))) + &  ! (1-x) * dyCu_W
-            (dyCu_E * (Phisub(qx,qy,i,j,2,1) + Phisub(qx,qy,i,j,2,2)))        ! + x * dyCu_E
+            (dyCu_E * (Phisub(qx,qy,i,j,2,1) + Phisub(qx,qy,i,j,2,2)))      !  + x  * dyCu_E
         jac_sub_wt = 0.25 * subarea * (a * d) * IareaT
 
         do n=1,2 ; do m=1,2
@@ -3970,10 +3970,10 @@ end subroutine CG_action_subgrid_basal
 !! single quadrature point. Encapsulates the 3-path dispatch (linear Weertman / nonlinear
 !! Weertman / Coulomb) so that CG_action, matrix_diagonal, and their subgrid equivalents
 !! remain readable. The ground_frac scaling is NOT applied here; callers do it after the call.
-pure subroutine compute_basal_coef(unorm2_qp, coef_prefactor, min_trac_area, fB_e, &
+subroutine compute_basal_coef(unorm2_qp, coef_prefactor, min_trac_area, fB_e, &
     n_basal_fric, CoulombFriction, CF_PostPeak, L_T_to_m_s, use_newton, &
     basal_coef, drag_newt)
-  real,    intent(in)  :: unorm2_qp      !< Regularized |u^k|^2 at quadrature point [L2 T-2 ~> m2 s-2]
+  real,    intent(in)  :: unorm2_qp      !< Regularized |u^k|^2 > 0 at quadrature point [L2 T-2 ~> m2 s-2]
   real,    intent(in)  :: coef_prefactor !< Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
   real,    intent(in)  :: min_trac_area  !< Pre-computed min_basal_traction * areaT floor [R L2 Z T-1 ~> kg s-1]
   real,    intent(in)  :: fB_e           !< Element-level Coulomb fB; 0 for Weertman [(T L-1)^CF_PostPeak]
@@ -3983,7 +3983,7 @@ pure subroutine compute_basal_coef(unorm2_qp, coef_prefactor, min_trac_area, fB_
   real,    intent(in)  :: L_T_to_m_s    !< Unit conversion factor from internal [L T-1] to [m s-1]
   logical, intent(in)  :: use_newton     !< If true, evaluate drag_newt; otherwise set to 0
   real,    intent(out) :: basal_coef     !< Picard friction coefficient at quadrature point [R L2 Z T-1 ~> kg s-1]
-  real,    intent(out) :: drag_newt      !< Newton drag coefficient [R Z T-1 ~> kg m-2 s-1]; 0 without Newton
+  real,    intent(out) :: drag_newt      !< Newton drag coefficient [R Z T ~> kg m-2 s]; 0 without Newton
 
   real :: unorm    ! |u^k| at quadrature point in physical units [m s-1]
   real :: raw_coef ! Pre-floor friction coefficient [R L2 Z T-1 ~> kg s-1]
@@ -4003,7 +4003,7 @@ pure subroutine compute_basal_coef(unorm2_qp, coef_prefactor, min_trac_area, fB_
     else
       basal_coef = raw_coef
       if (use_newton) then
-        drag_newt = (1.0/max(unorm2_qp,epsilon(unorm2_qp))) * raw_coef * &
+        drag_newt = (1.0/unorm2_qp) * raw_coef * &
             ((n_basal_fric-1.0) - n_basal_fric * CF_PostPeak * fBuq / (1.0 + fBuq))
       else
         drag_newt = 0.0
@@ -4018,7 +4018,7 @@ pure subroutine compute_basal_coef(unorm2_qp, coef_prefactor, min_trac_area, fB_
     else
       basal_coef = raw_coef
       if (use_newton) then
-        drag_newt = (n_basal_fric-1.0) / max(unorm2_qp, epsilon(unorm2_qp)) * raw_coef
+        drag_newt = (n_basal_fric-1.0) / unorm2_qp * raw_coef
       else
         drag_newt = 0.0
       endif
@@ -4333,7 +4333,7 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
   real :: v_curr_loc     ! Frozen v^k interpolated to sub-qp [L T-1 ~> m s-1]
   real :: unorm2_loc     ! Regularized |u^k|^2 at sub-qp [L2 T-2 ~> m2 s-2]
   real :: basal_coef_loc ! Picard friction coefficient at sub-qp [R L2 Z T-1 ~> kg s-1]
-  real :: drag_newt_loc  ! Newton drag coefficient at sub-qp [R Z T-1 ~> kg m-2 s-1]
+  real :: drag_newt_loc  ! Newton drag coefficient at sub-qp [R Z T ~> kg m-2 s]
   real :: phi_mn_sq      ! Squared basis function value at sub-qp [nondim]
   real :: contrib        ! Quadrature weight contribution [nondim]
   real :: coef_prefactor ! Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
@@ -4373,10 +4373,10 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
         ! from bilinear_shape_functions_subgrid.  Marginal sums of Phisub give the interpolation
         ! weights: sum over k=1 nodes gives (1-y); k=2 gives y; l=1 gives (1-x); l=2 gives x.
         ! This is analogous to jac_wt = CS%Jac(qp,i,j) * G%IareaT(i,j) in the regular routines.
-        a = dxCv_S * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,2,1)) + &  ! (1-y) * dxCv_S
-          dxCv_N * (Phisub(qx,qy,i,j,1,2) + Phisub(qx,qy,i,j,2,2))        ! + y * dxCv_N
-        d = dyCu_W * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,1,2)) + &  ! (1-x) * dyCu_W
-          dyCu_E * (Phisub(qx,qy,i,j,2,1) + Phisub(qx,qy,i,j,2,2))        ! + x * dyCu_E
+        a = (dxCv_S * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,2,1))) + &  ! (1-y) * dxCv_S
+            (dxCv_N * (Phisub(qx,qy,i,j,1,2) + Phisub(qx,qy,i,j,2,2)))      !  + y  * dxCv_N
+        d = (dyCu_W * (Phisub(qx,qy,i,j,1,1) + Phisub(qx,qy,i,j,1,2))) + &  ! (1-x) * dyCu_W
+            (dyCu_E * (Phisub(qx,qy,i,j,2,1) + Phisub(qx,qy,i,j,2,2)))      !  + x  * dyCu_E
         jac_sub_wt = 0.25 * subarea * (a * d) * IareaT
 
         do n=1,2 ; do m=1,2
@@ -4977,7 +4977,7 @@ subroutine bilinear_shape_fn_grid(G, i, j, Phi, Jac)
   real, dimension(8,4),  intent(inout) :: Phi !< The gradients of bilinear basis elements at Gaussian
                                               !! quadrature points surrounding the cell vertices [L-1 ~> m-1].
   real, dimension(4), optional, intent(out) :: Jac !< Jacobian determinant |J_q| = a_q*d_q at each
-                                              !! Gaussian quadrature point [L2 ~> m2].
+                                                   !! Gaussian quadrature point [L2 ~> m2].
 
 ! This subroutine calculates the gradients of bilinear basis elements that
 ! that are centered at the vertices of the cell.  The values are calculated at
@@ -4994,7 +4994,7 @@ subroutine bilinear_shape_fn_grid(G, i, j, Phi, Jac)
   ! Mirror lookups: xquad_m(qp) == 1 - xquad(qp), yquad_m(qp) == 1 - yquad(qp) mathematically,
   ! but each mirror entry is the stored value at the x- or y-mirrored quadrature point. This
   ! ensures rotation-paired QPs read bit-identical operand values (avoids the (1 - v) vs v_other
-  ! 1-ulp asymmetry that breaks rotation invariance under ifx -fp-model fast).
+  ! 1-ulp asymmetry that breaks rotation invariance)
   real, dimension(4) :: xquad_m, yquad_m
   real :: a, d       ! Interpolated grid spacings [L ~> m]
   real :: xexp, yexp ! [nondim]
