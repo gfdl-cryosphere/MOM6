@@ -128,7 +128,7 @@ use MOM_porous_barriers,       only : porous_widths_layer, porous_widths_interfa
 use MOM_porous_barriers,       only : porous_barrier_CS
 use MOM_set_visc,              only : set_viscous_BBL, set_viscous_ML, set_visc_CS
 use MOM_set_visc,              only : set_visc_register_restarts, remap_vertvisc_aux_vars
-use MOM_set_visc,              only : set_visc_init, set_visc_end
+use MOM_set_visc,              only : set_visc_init, set_visc_end, set_shelf_exp_decay
 use MOM_shared_initialization, only : write_ocean_geometry_file
 use MOM_sponge,                only : init_sponge_diags, sponge_CS
 use MOM_state_initialization,  only : MOM_initialize_state, MOM_initialize_OBCs
@@ -962,6 +962,12 @@ subroutine step_MOM(forces_in, fluxes_in, sfc_state, Time_start, time_int_in, CS
         enddo ; enddo
       endif
 
+      if (allocated(CS%visc%uvdecay2d_h)) then
+        call enable_averages(dt, Time_local, CS%diag)
+        call set_shelf_exp_decay(CS%visc, fluxes, h, G, GV, US, CS%set_visc_CSp)
+        call disable_averaging(CS%diag)
+      endif
+
       call step_MOM_dynamics(forces, CS%p_surf_begin, CS%p_surf_end, dt, &
                              dt_tradv_here, bbl_time_int, CS, &
                              Time_local, Waves=Waves)
@@ -1694,13 +1700,13 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
 
     if (CS%debug) then
       call uvchksum("Post-diabatic u", u, v, G%HI, haloshift=2, unscale=US%L_T_to_m_s)
-      call hchksum(h, "Post-diabatic h", G%HI, haloshift=1, unscale=GV%H_to_MKS)
+      call hchksum(h, "Post-diabatic h", G%HI, haloshift=0, unscale=GV%H_to_MKS)
       call uvchksum("Post-diabatic [uv]h", CS%uhtr, CS%vhtr, G%HI, &
                     haloshift=0, unscale=GV%H_to_MKS*US%L_to_m**2)
     ! call MOM_state_chksum("Post-diabatic ", u, v, &
     !                       h, CS%uhtr, CS%vhtr, G, GV, haloshift=1)
-      if (associated(tv%T)) call hchksum(tv%T, "Post-diabatic T", G%HI, haloshift=1, unscale=US%C_to_degC)
-      if (associated(tv%S)) call hchksum(tv%S, "Post-diabatic S", G%HI, haloshift=1, unscale=US%S_to_ppt)
+      if (associated(tv%T)) call hchksum(tv%T, "Post-diabatic T", G%HI, haloshift=0, unscale=US%C_to_degC)
+      if (associated(tv%S)) call hchksum(tv%S, "Post-diabatic S", G%HI, haloshift=0, unscale=US%S_to_ppt)
       if (associated(tv%frazil)) call hchksum(tv%frazil, "Post-diabatic frazil", G%HI, haloshift=0, &
                                               unscale=US%Q_to_J_kg*US%RZ_to_kg_m2)
       if (associated(tv%salt_deficit)) call hchksum(tv%salt_deficit, &
@@ -1899,21 +1905,21 @@ subroutine ALE_regridding_and_remapping(CS, G, GV, US, u, v, h, tv, dtdia, Time_
   call postALE_tracer_diagnostics(CS%tracer_Reg, G, GV, CS%diag, dtdia)
 
   if (CS%debug .and. CS%use_ALE_algorithm) then
-    call MOM_state_chksum("Post-ALE ", u, v, h, CS%uh, CS%vh, G, GV, US)
-    call hchksum(tv%T, "Post-ALE T", G%HI, haloshift=1, unscale=US%C_to_degC)
-    call hchksum(tv%S, "Post-ALE S", G%HI, haloshift=1, unscale=US%S_to_ppt)
+    call MOM_state_chksum("Post-ALE ", u, v, h, CS%uh, CS%vh, G, GV, US, haloshift=0)
+    call hchksum(tv%T, "Post-ALE T", G%HI, haloshift=0, unscale=US%C_to_degC)
+    call hchksum(tv%S, "Post-ALE S", G%HI, haloshift=0, unscale=US%S_to_ppt)
     if (debug_redundant) &
       call check_redundant("Post-ALE ", u, v, G, unscale=US%L_T_to_m_s)
   endif
   if (CS%debug) then
-    call uvchksum("Post-ALE, Post-diabatic u", u, v, G%HI, haloshift=2, unscale=US%L_T_to_m_s)
-    call hchksum(h, "Post-ALE, Post-diabatic h", G%HI, haloshift=1, unscale=GV%H_to_MKS)
+    call uvchksum("Post-ALE, Post-diabatic u", u, v, G%HI, haloshift=0, unscale=US%L_T_to_m_s)
+    call hchksum(h, "Post-ALE, Post-diabatic h", G%HI, haloshift=0, unscale=GV%H_to_MKS)
     call uvchksum("Post-ALE, Post-diabatic [uv]h", CS%uhtr, CS%vhtr, G%HI, &
                   haloshift=0, unscale=GV%H_to_MKS*US%L_to_m**2)
   ! call MOM_state_chksum("Post-diabatic ", u, v, &
   !                       h, CS%uhtr, CS%vhtr, G, GV, haloshift=1)
-    if (associated(tv%T)) call hchksum(tv%T, "Post-ALE, Post-diabatic T", G%HI, haloshift=1, unscale=US%C_to_degC)
-    if (associated(tv%S)) call hchksum(tv%S, "Post-ALE, Post-diabatic S", G%HI, haloshift=1, unscale=US%S_to_ppt)
+    if (associated(tv%T)) call hchksum(tv%T, "Post-ALE, Post-diabatic T", G%HI, haloshift=0, unscale=US%C_to_degC)
+    if (associated(tv%S)) call hchksum(tv%S, "Post-ALE, Post-diabatic S", G%HI, haloshift=0, unscale=US%S_to_ppt)
     if (associated(tv%frazil)) call hchksum(tv%frazil, "Post-ALE, Post-diabatic frazil", G%HI, haloshift=0, &
                                             unscale=US%Q_to_J_kg*US%RZ_to_kg_m2)
     if (associated(tv%salt_deficit)) call hchksum(tv%salt_deficit, &

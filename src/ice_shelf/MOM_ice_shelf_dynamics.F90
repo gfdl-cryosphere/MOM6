@@ -1574,8 +1574,6 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
     enddo ; enddo
   endif
 
-  call calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, CS%OD_av)
-  call pass_vector(taudx, taudy, G%domain, TO_ALL, BGRID_NE)
   ! This is to determine which cells contain the grounding line, the criterion being that the cell
   ! is ice-covered, with some nodes floating and some grounded flotation condition is estimated by
   ! assuming topography is cellwise constant and H is bilinear in a cell; floating where
@@ -1598,14 +1596,22 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
       enddo ; enddo
       if ((nodefloat > 0) .and. (nodefloat < 4)) then
         CS%float_cond(i,j) = 1.0
-        CS%ground_frac(i,j) = 1.0
+        ! CS%ground_frac(i,j) = 1.0
       endif
     enddo ; enddo
 
     call pass_var(CS%float_cond, G%Domain, complete=.false.)
-    call pass_var(CS%ground_frac, G%domain, complete=.false.)
 
   endif
+
+  call pass_var(CS%ground_frac, G%domain, complete=.false.)
+
+  call calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, CS%OD_av)
+  call pass_vector(taudx, taudy, G%domain, TO_ALL, BGRID_NE)
+
+  do j=G%jsd,G%jed ; do i=G%isd,G%ied
+    if (CS%float_cond(i,j)==1.0) CS%ground_frac(i,j)=1.0
+  enddo ; enddo
 
   call calc_shelf_taub(CS, ISS, G, US, u_shlf, v_shlf)
   call pass_var(CS%basal_traction, G%domain, complete=.true.)
@@ -1623,6 +1629,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
     enddo ; enddo
   endif
 
+  err_init = 0
   if (CS%nonlin_solve_err_mode == 1) then
 
     Au(:,:) = 0.0 ; Av(:,:) = 0.0
@@ -1632,7 +1639,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
                    G, US, G%isc-1, G%iec+1, G%jsc-1, G%jec+1, rhoi_rhow, use_newton_in=.false.)
     call pass_vector(Au, Av, G%domain, TO_ALL, BGRID_NE)
 
-    err_init = 0 ; err_tempu = 0 ; err_tempv = 0
+    err_tempu = 0 ; err_tempv = 0
     do J=G%JscB,G%JecB ; do I=G%IscB,G%IecB
       if (CS%umask(I,J) == 1) then
         err_tempu = ABS(Au(I,J) - taudx(I,J))
@@ -3186,6 +3193,7 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
 !    (it is assumed that base_ice = bed + OD)
 
   real, dimension(SIZE(OD,1),SIZE(OD,2))  :: S     ! surface elevation [Z ~> m].
+  real, dimension(SIZE(OD,1),SIZE(OD,2))  :: Sf     ! surface elevation if ice was floating [Z ~> m].
   real, dimension(SZDI_(G),SZDJ_(G)) :: sx_e, sy_e !element contributions to driving stress
   real    :: rho, rhow, rhoi_rhow ! Ice and ocean densities [R ~> kg m-3]
   real    :: sx, sy    ! Ice shelf top slopes at tracer points [Z L-1 ~> nondim]
@@ -3196,6 +3204,7 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
   integer :: i, j, iscq, iecq, jscq, jecq, isd, jsd, ied, jed, is, js, iegq, jegq
   integer :: giec, gjec, gisc, gjsc, isc, jsc, iec, jec
   integer :: i_off, j_off
+  real :: Sl,Sr
 
   isc = G%isc ; jsc = G%jsc ; iec = G%iec ; jec = G%jec
 !  iscq = G%iscB ; iecq = G%iecB ; jscq = G%jscB ; jecq = G%jecB
@@ -3224,13 +3233,16 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
     do j=jsc-2,jec+2 ; do i=isc-2,iec+2
       if (rhoi_rhow * max(ISS%h_shelf(i,j),CS%min_h_shelf) - CS%bed_elev(i,j) <= 0) then
         S(i,j) = (1 - rhoi_rhow)*max(ISS%h_shelf(i,j),CS%min_h_shelf)
+        Sf(i,j) = S(i,j)
       else
         S(i,j) = max(ISS%h_shelf(i,j),CS%min_h_shelf)-CS%bed_elev(i,j)
+        Sf(i,j) = (1 - rhoi_rhow)*max(ISS%h_shelf(i,j),CS%min_h_shelf)
       endif
     enddo ; enddo
   endif
 
-  call pass_var(S, G%domain)
+  call pass_var(S, G%domain, complete=.false.)
+  call pass_var(Sf, G%domain, complete=.true.)
 
   do j=jsc-1,jec+1
     do i=isc-1,iec+1
@@ -3256,6 +3268,27 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
             sx = (S(i,j) - S(i-1,j)) / (G%dxT(i,j) + G%dxT(i-1,j))
           endif
         else ! Correct the bugs in the version above.
+          Sr=S(i+1,j)
+          Sl=S(i-1,j)
+          ! if (CS%ground_frac(i,j)==0 .or. CS%float_cond(i,j)==1) then
+          !   if (valid_E .and. (CS%float_cond(i+1,j)==1 .or. CS%ground_frac(i+1,j)==1)) valid_E=.false. !Sr=Sf(i+1,j)
+          !   if (valid_W .and. (CS%float_cond(i-1,j)==1 .or. CS%ground_frac(i-1,j)==1)) valid_W=.false. !Sl=Sf(i-1,j)
+          ! endif
+          ! if (CS%float_cond(i,j)==1) then
+          !   if (valid_N .and. (CS%ground_frac(i,j+1)==1 .and. CS%float_cond(i,j+1)==0)) valid_N=.false. !Sr=Sf(i,j+1)
+          !   if (valid_S .and. (CS%ground_frac(i,j-1)==1 .and. CS%float_cond(i,j-1)==0)) valid_S=.false. !Sl=Sf(i,j-1)
+          ! elseif (CS%ground_frac(i,j)==0) then
+          !   if (valid_N .and. (CS%float_cond(i,j+1)==1 .or. CS%ground_frac(i,j+1)==1)) valid_N=.false. !Sr=Sf(i,j+1)
+          !   if (valid_S .and. (CS%float_cond(i,j-1)==1 .or. CS%ground_frac(i,j-1)==1)) valid_S=.false. !Sl=Sf(i,j-1)
+          ! endif
+          if (CS%float_cond(i,j)==1) then
+            if (valid_E .and. (CS%ground_frac(i+1,j)==1 .and. CS%float_cond(i+1,j)==0)) valid_E=.false. !Sr=Sf(i+1,j)
+            if (valid_W .and. (CS%ground_frac(i-1,j)==1 .and. CS%float_cond(i-1,j)==0)) valid_W=.false. !Sl=Sf(i-1,j)
+          elseif (CS%ground_frac(i,j)==0) then
+            if (valid_E .and. CS%ground_frac(i+1,j)==1) valid_E=.false. !Sr=Sf(i+1,j)
+            if (valid_W .and. CS%ground_frac(i-1,j)==1) valid_W=.false. !Sl=Sf(i-1,j)
+          endif
+
           if (((i+i_off) == gisc) .and. (.not.CS%reentrant_x)) then ! at west computational bdry
             if (valid_E) sx = (S(i+1,j) - S(i,j)) * G%IdxCu(I,j)
           elseif (((i+i_off) == giec) .and. (.not.CS%reentrant_x)) then ! at east computational bdry
@@ -3265,8 +3298,23 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
             sx = 0.5*(S(i+1,j) - S(i-1,j)) * G%IdxT(i,j)
           elseif (valid_E) then ! Use a one-sided estimate from the east.
             sx = (S(i+1,j) - S(i,j)) * G%IdxCu(I,j)
+
+            ! ! For floating cells, if the neighbor is grounded, use a ghost cell so that the slope is smaller
+            ! if ((CS%ground_frac(i,j)==0 .and. (CS%ground_frac(i+1,j)==1 .or. CS%float_cond(i+1,j)==1)) &
+            !   .or. CS%float_cond(i,j)==1) then
+            !   ! sx = 0.5*(Sr - S(i,j)) * G%IdxT(i,j)
+            ! else
+            !   sx = (Sr - S(i,j)) * G%IdxCu(I,j)
+            ! endif
+
           elseif (valid_W) then ! Use a one-sided estimate from the west.
             sx = (S(i,j) - S(i-1,j)) * G%IdxCu(I-1,j)
+            ! if ((CS%ground_frac(i,j)==0 .and. (CS%ground_frac(i-1,j)==1 .or. CS%float_cond(i-1,j)==1)) &
+            !   .or. CS%float_cond(i,j)==1) then
+            !   ! sx = 0.5*(S(i,j) - Sl) * G%IdxT(i,j)
+            ! else
+            !   sx = (S(i,j) - Sl) * G%IdxCu(I-1,j)
+            ! endif
           endif
         endif
 
@@ -3288,6 +3336,28 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
             sy = (S(i,j) - S(i,j-1)) / (G%dyT(i,j) + G%dyT(i,j-1))
           endif
         else ! Correct the bugs in the version above.
+          Sr=S(i,j+1)
+          Sl=S(i,j-1)
+          ! if (CS%ground_frac(i,j)==0 .or. CS%float_cond(i,j)==1) then
+          !   if (valid_N .and. (CS%float_cond(i,j+1)==1 .or. CS%ground_frac(i,j+1)==1)) valid_N=.false. !Sr=Sf(i,j+1)
+          !   if (valid_S .and. (CS%float_cond(i,j-1)==1 .or. CS%ground_frac(i,j-1)==1)) valid_S=.false. !Sl=Sf(i,j-1)
+          ! endif
+          ! if (CS%ground_frac(i,j)==0) then
+          !   if (valid_N .and. (CS%float_cond(i,j+1)==1 .or. CS%ground_frac(i,j+1)==1)) valid_N=.false. !Sr=Sf(i,j+1)
+          !   if (valid_S .and. (CS%float_cond(i,j-1)==1 .or. CS%ground_frac(i,j-1)==1)) valid_S=.false. !Sl=Sf(i,j-1)
+          ! endif
+          ! if (CS%float_cond(i,j)==1) then
+          !   if (valid_N .and. (CS%ground_frac(i,j+1)==1)) valid_N=.false. !Sr=Sf(i,j+1)
+          !   if (valid_S .and. (CS%ground_frac(i,j-1)==1)) valid_S=.false. !Sl=Sf(i,j-1)
+          ! endif
+          if (CS%float_cond(i,j)==1) then
+            if (valid_N .and. (CS%ground_frac(i,j+1)==1 .and. CS%float_cond(i,j+1)==0)) valid_N=.false. !Sr=Sf(i,j+1)
+            if (valid_S .and. (CS%ground_frac(i,j-1)==1 .and. CS%float_cond(i,j-1)==0)) valid_S=.false. !Sl=Sf(i,j-1)
+          elseif (CS%ground_frac(i,j)==0) then
+            if (valid_N .and. CS%ground_frac(i,j+1)==1) valid_N=.false. !Sr=Sf(i,j+1)
+            if (valid_S .and. CS%ground_frac(i,j-1)==1) valid_S=.false. !Sl=Sf(i,j-1)
+          endif
+
           if (((j+j_off) == gjsc) .and. (.not. CS%reentrant_y)) then ! at south computational bdry
             if (valid_N) sy = (S(i,j+1) - S(i,j)) * G%IdyCv(i,J)
           elseif (((j+j_off) == gjec) .and. (.not. CS%reentrant_y)) then ! at north computational bdry
@@ -3297,8 +3367,20 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
             sy = 0.5*(S(i,j+1) - S(i,j-1)) * G%IdyT(i,j)
           elseif (valid_N) then ! Use a one-sided estimate from the north.
             sy = (S(i,j+1) - S(i,j)) * G%IdyCv(i,J)
+            ! if ((CS%ground_frac(i,j)==0 .and. (CS%ground_frac(i,j+1)==1 .or. CS%float_cond(i,j+1)==1)) &
+            !   .or. CS%float_cond(i,j)==1) then
+            !   ! sy = 0.5*(Sr - S(i,j)) * G%IdyT(i,j)
+            ! else
+            !   sy = (Sr - S(i,j)) * G%IdyCv(i,J)
+            ! endif
           elseif (valid_S) then ! Use a one-sided estimate from the south.
             sy = (S(i,j) - S(i,j-1)) * G%IdyCv(i,J-1)
+            ! if ((CS%ground_frac(i,j)==0 .and. (CS%ground_frac(i,j-1)==1 .or. CS%float_cond(i,j-1)==1)) &
+            !   .or. CS%float_cond(i,j)==1) then
+            !   !sy = 0.5*(S(i,j) - Sl) * G%IdyT(i,j)
+            ! else
+            !   sy = (S(i,j) - Sl) * G%IdyCv(i,J-1)
+            ! endif
           endif
         endif
 
@@ -3313,7 +3395,7 @@ subroutine calc_shelf_driving_stress(CS, ISS, G, US, taudx, taudy, OD)
         CS%sx_shelf(i,j) = sx ; CS%sy_shelf(i,j) = sy
 
         !Stress (Neumann) boundary conditions
-        if (CS%ground_frac(i,j) == 1) then
+        if (CS%ground_frac(i,j) == 1 .and. CS%float_cond(i,j)==0) then
           neumann_val = ((.5 * grav) * (rho * max(ISS%h_shelf(i,j),CS%min_h_shelf)**2 - rhow * CS%bed_elev(i,j)**2))
         else
           neumann_val = (.5 * grav) * ((1-rho/rhow) * (rho * max(ISS%h_shelf(i,j),CS%min_h_shelf)**2))
