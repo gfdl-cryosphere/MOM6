@@ -800,6 +800,18 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
                   u_cor=u_av, v_cor=v_av, BT_cont=CS%BT_cont)
   if (CS%hack_recalc_visc_remnant) then
     ! TEST OF SILLY IDEA
+    if (CS%debug) then
+      call uvchksum("VR-recalc [uv]p", up, vp, G%HI, haloshift=1, symmetric=sym, unscale=US%L_T_to_m_s)
+      call hchksum(hp, "VR-recalc hp", G%HI, haloshift=0, unscale=GV%H_to_MKS)
+      call uvchksum("VR-recalc [uv]h", uh, vh, G%HI,haloshift=0, &
+                    symmetric=sym, unscale=GV%H_to_MKS*US%L_to_m**2*US%s_to_T)
+      call uvchksum("VR-recalc [uv]_av", u_av, v_av, G%HI, haloshift=0, symmetric=sym, unscale=US%L_T_to_m_s)
+      if (debug_redundant) then
+        call check_redundant("VR-recalc [uv]p", up, vp, G, unscale=US%L_T_to_m_s)
+        call check_redundant("VR-recalc [uv]h", uh, vh, G, unscale=GV%H_to_MKS*US%L_to_m**2*US%s_to_T)
+        call check_redundant("VR-recalc [uv]_av", u_av, v_av, G, unscale=US%L_T_to_m_s)
+      endif
+    endif
     call vertvisc_coef(u_av, v_av, h, dz, forces, visc, tv, dt_pred, G, GV, US, CS%vertvisc_CSp, &
                       CS%OBC, VarMix)
     call vertvisc_remnant(visc, CS%visc_rem_u, CS%visc_rem_v, dt, G, GV, US, CS%vertvisc_CSp)
@@ -832,6 +844,11 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
   do k=1,nz ; do j=js-cor_stencil,je+cor_stencil ; do i=is-cor_stencil,ie+cor_stencil
     h_av(i,j,k) = 0.5*(h(i,j,k) + hp(i,j,k))
   enddo ; enddo ; enddo
+  if (CS%debug) then
+    call hchksum(h, "Corrector h", G%HI, haloshift=1, unscale=GV%H_to_MKS)
+    call hchksum(hp, "Corrector hp", G%HI, haloshift=1, unscale=GV%H_to_MKS)
+    call hchksum(h_av, "Corrector h_av", G%HI, haloshift=1, unscale=GV%H_to_MKS)
+  endif
 
   ! The correction phase of the time step starts here.
   call enable_averages(dt, Time_local, CS%diag)
@@ -887,6 +904,9 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
   endif
 
   if (BT_cont_BT_thick) then
+    if (CS%debug) then
+      call uvchksum("before btcalc: BT_cont%h[uv]", CS%BT_cont%h_u, CS%BT_cont%h_v, G%HI, haloshift=0, symmetric=sym, unscale=GV%H_to_MKS*US%L_to_m**2*US%s_to_T)
+    endif
     call btcalc(h, G, GV, CS%barotropic_CSp, CS%BT_cont%h_u, CS%BT_cont%h_v, &
                 OBC=CS%OBC)
     if (showCallTree) call callTree_wayPoint("done with btcalc[BT_cont_BT_thick] (step_MOM_dyn_split_RK2)")
