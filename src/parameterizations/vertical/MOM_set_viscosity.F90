@@ -2788,7 +2788,7 @@ subroutine set_shelf_exp_decay(visc, fluxes, h, G, GV, US, CS)
   if (.not.associated(fluxes%p_surf_full)) call MOM_error(FATAL,"MOM_set_viscosity(set_shelf_exp_decay): "//&
          "fluxes%p_surf_full is not allocated. Is the ice-shelf setting this array?")
 
-  do j=G%jsc-1,G%jec+1 ; do i=G%isc-1,G%iec+1
+  do j=G%jsc,G%jec ; do i=G%isc,G%iec
     if (fluxes%frac_shelf_h(i,j) > 0.) then
       htot = GV%h_subroundoff
       do k = 1, GV%ke
@@ -2801,6 +2801,7 @@ subroutine set_shelf_exp_decay(visc, fluxes, h, G, GV, US, CS)
       visc%uvdecay2d_h(i,j) = 0.
     endif
   enddo ; enddo
+  call pass_var(visc%uvdecay2d_h, G%Domain)
   if (CS%id_shelf_uvdecay2d>0) call post_data(CS%id_shelf_uvdecay2d, visc%uvdecay2d_h, CS%diag)
 
 end subroutine set_shelf_exp_decay

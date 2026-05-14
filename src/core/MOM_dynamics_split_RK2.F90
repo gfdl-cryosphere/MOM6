@@ -815,6 +815,7 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
     call vertvisc_coef(u_av, v_av, h, dz, forces, visc, tv, dt_pred, G, GV, US, CS%vertvisc_CSp, &
                       CS%OBC, VarMix)
     call vertvisc_remnant(visc, CS%visc_rem_u, CS%visc_rem_v, dt, G, GV, US, CS%vertvisc_CSp)
+    call do_group_pass(CS%pass_visc_rem, G%Domain, clock=id_clock_pass)
     call continuity(up, vp, h, hp, uh, vh, dt, G, GV, US, CS%continuity_CSp, CS%OBC, pbv, &
                     uhbt=CS%uhbt, vhbt=CS%vhbt, visc_rem_u=CS%visc_rem_u, visc_rem_v=CS%visc_rem_v, &
                     u_cor=u_av, v_cor=v_av, BT_cont=CS%BT_cont)
@@ -1091,6 +1092,7 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
     call vertvisc_coef(u_av, v_av, h, dz, forces, visc, tv, dt_pred, G, GV, US, CS%vertvisc_CSp, &
                        CS%OBC, VarMix)
     call vertvisc_remnant(visc, CS%visc_rem_u, CS%visc_rem_v, dt, G, GV, US, CS%vertvisc_CSp)
+    call do_group_pass(CS%pass_visc_rem, G%Domain, clock=id_clock_pass)
   endif
   call continuity(u_inst, v_inst, h, h, uh, vh, dt, G, GV, US, CS%continuity_CSp, CS%OBC, pbv, &
                   uhbt=CS%uhbt, vhbt=CS%vhbt, visc_rem_u=CS%visc_rem_u, visc_rem_v=CS%visc_rem_v, &
