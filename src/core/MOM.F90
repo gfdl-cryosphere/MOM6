@@ -16,7 +16,7 @@ use MOM_cpu_clock,            only : cpu_clock_id, cpu_clock_begin, cpu_clock_en
 use MOM_cpu_clock,            only : CLOCK_COMPONENT, CLOCK_SUBCOMPONENT
 use MOM_cpu_clock,            only : CLOCK_MODULE_DRIVER, CLOCK_MODULE, CLOCK_ROUTINE
 use MOM_diag_mediator,        only : diag_mediator_init, enable_averaging, enable_averages
-use MOM_diag_mediator,        only : diag_mediator_infrastructure_init
+use MOM_diag_mediator,        only : diag_mediator_infrastructure_init, diag_mediator_set_OBC_info
 use MOM_diag_mediator,        only : diag_set_state_ptrs, diag_update_remap_grids
 use MOM_diag_mediator,        only : disable_averaging, post_data, safe_alloc_ptr
 use MOM_diag_mediator,        only : register_diag_field, register_cell_measure
@@ -1234,7 +1234,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_tr_adv, &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt_tr_adv, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, &
-                             CS%stoch_CS)
+                             CS%stoch_CS, u, v)
       call cpu_clock_end(id_clock_thick_diff)
       call pass_var(h, G%Domain, clock=id_clock_pass, halo=CS%dyn_h_stencil)
       if (showCallTree) call callTree_waypoint("finished thickness_diffuse_first (step_MOM)")
@@ -1385,8 +1385,8 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_tr_adv, &
       if (CS%VarMix%use_variable_mixing) &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
-                             CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, CS%stoch_CS)
-
+                             CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, &
+                             CS%stoch_CS, u, v)
       call cpu_clock_end(id_clock_thick_diff)
       call pass_var(h, G%Domain, clock=id_clock_pass, halo=CS%dyn_h_stencil)
       if (CS%debug) call hchksum(h,"Post-thickness_diffuse h", G%HI, haloshift=1, unscale=GV%H_to_MKS)
@@ -2366,7 +2366,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
   call get_MOM_input(param_file, dirs, default_input_filename=input_restart_file, ensemble_num=ensemble_num)
 
   verbosity = 2 ; call read_param(param_file, "VERBOSITY", verbosity)
-  call MOM_set_verbosity(verbosity)
+  call MOM_set_verbosity(verbosity, .true.)
   call callTree_enter("initialize_MOM(), MOM.F90")
 
   call find_obsolete_params(param_file)
@@ -2381,6 +2381,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
                  "Integer controlling level of messaging\n" // &
                  "\t0 = Only FATAL messages\n" // &
                  "\t2 = Only FATAL, WARNING, NOTE [default]\n" // &
+                 "\t6 = Above plus call tree messages\n" //&
                  "\t9 = All)", default=2, debuggingParam=.true.)
   call get_param(param_file, "MOM", "DO_UNIT_TESTS", do_unit_tests, &
                  "If True, exercises unit tests at model start up.", &
@@ -2628,12 +2629,6 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
                  units="s", default=default_val, scale=US%s_to_T, do_not_read=(dtbt > 0.0))
   endif
 
-  call get_param(param_file, "MOM", "DT_OBC_SEG_UPDATE_OBGC", CS%dt_obc_seg_period, &
-               "The time between OBC segment data updates for OBGC tracers. "//&
-               "This must be an integer multiple of DT and DT_THERM. "//&
-               "The default is set to DT.", &
-               units="s", default=US%T_to_s*CS%dt, scale=US%s_to_T, do_not_log=.not.associated(OBC_in))
-
   ! This is here in case these values are used inappropriately.
   use_frazil = .false. ; bound_salinity = .false. ; use_p_surf_in_EOS = .false.
   CS%tv%P_Ref = 2.0e7*US%Pa_to_RL2_T2
@@ -2880,6 +2875,11 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
 
   ! Allocate initialize time-invariant MOM variables.
   call MOM_initialize_fixed(dG_in, US, OBC_in, param_file)
+
+  call get_param(param_file, "MOM", "DT_OBC_SEG_UPDATE_OBGC", CS%dt_obc_seg_period, &
+                 "The time between OBC segment data updates for OBGC tracers.  This must be an "//&
+                 "integer multiple of DT and DT_THERM.  The default is set to DT.", units="s", &
+                 default=US%T_to_s*CS%dt, scale=US%s_to_T, do_not_log=.not.associated(OBC_in))
 
   ! Copy the grid metrics and bathymetry to the ocean_grid_type
   call copy_dyngrid_to_MOM_grid(dG_in, G_in, US)
@@ -3462,6 +3462,9 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
   diag => CS%diag
   ! Initialize the diag mediator.
   call diag_mediator_init(G, GV, US, GV%ke, param_file, diag, doc_file_dir=dirs%output_directory)
+  if (associated(CS%OBC)) then
+    call diag_mediator_set_OBC_info(G, CS%OBC%segnum_u, CS%OBC%segnum_v, diag)
+  endif
   if (present(diag_ptr)) diag_ptr => CS%diag
 
   ! Initialize the diagnostics masks for native arrays.
