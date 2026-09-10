@@ -129,7 +129,7 @@ type, public :: ice_shelf_dyn_CS ; private
   real, pointer, dimension(:,:) :: coef_prefactor => NULL() !< Pre-computed area*C_basal_friction*L_T_to_m_s for
                                !! basal friction quadrature evaluation [R L2 Z T-1 ~> kg s-1].
   real, pointer, dimension(:,:) :: fB_elem => NULL()        !< Pre-computed element-level Coulomb fB parameter
-                               !! [(T L-1)^CF_PostPeak]; 0 for Weertman.
+                               !! [(s m-1)^CF_PostPeak]; 0 for Weertman.
                                !! Updated each outer iteration by calc_shelf_basal_prefactors.
   real :: alpha_coulomb = 1.0  !< Coulomb prefactor (CF_PostPeak-1)^(CF_PostPeak-1)/CF_PostPeak^CF_PostPeak [nondim]
   real :: coulomb_pp_n         !< CF_PostPeak/n_basal_fric [nondim]
@@ -523,7 +523,7 @@ subroutine initialize_ice_shelf_dyn(param_file, Time, ISS, CS, G, US, diag, new_
                           ! in through open boundaries [C ~> degC]
   !This include declares and sets the variable "version".
 # include "version_variable.h"
-  character(len=200) :: IC_file,filename,inputdir
+  character(len=200) :: IC_file, filename, inputdir
   character(len=40)  :: var_name
   character(len=40)  :: mdl = "MOM_ice_shelf_dyn"  ! This module's name.
   logical :: shelf_mass_is_dynamic, override_shelf_movement, active_shelf_dynamics
@@ -1028,7 +1028,8 @@ subroutine initialize_ice_shelf_dyn(param_file, Time, ISS, CS, G, US, diag, new_
     CS%id_visc_shelf = register_diag_field('ice_shelf_model','ice_visc',CS%diag%axesT1, Time, &
        'vi-viscosity', 'Pa m s', conversion=US%RL2_T2_to_Pa*US%Z_to_m*US%T_to_s) !vertically integrated viscosity
     CS%id_taub = register_diag_field('ice_shelf_model','taub_beta',CS%diag%axesT1, Time, &
-       'taub', units='MPa yr m-1', conversion=1e-6*US%RLZ_T2_to_Pa/(365.0*86400.0*US%L_T_to_m_s))
+       'basal traction coefficient, taub/|u|', units='MPa yr m-1', &
+       conversion=1e-6*US%RLZ_T2_to_Pa/(365.0*86400.0*US%L_T_to_m_s))
     CS%id_OD_av = register_diag_field('ice_shelf_model','OD_av',CS%diag%axesT1, Time, &
        'intermediate ocean column thickness passed to ice model', 'm', conversion=US%Z_to_m)
 
@@ -1201,7 +1202,7 @@ subroutine volume_above_floatation(CS, G, ISS, vaf, hemisphere)
   integer :: IS_ID ! local copy of hemisphere
   real, dimension(SZI_(G),SZJ_(G))  :: vaf_cell !< cell-wise volume above floatation [Z L2 ~> m3]
   integer, dimension(SZI_(G),SZJ_(G))  :: mask ! a mask for active cells depending on hemisphere indicated
-  integer :: is,ie,js,je,i,j
+  integer :: is, ie, js, je, i, j
 
   if (CS%GL_couple) &
     call MOM_error(FATAL, "MOM_ice_shelf_dyn, volume above floatation calculation assumes GL_couple=.FALSE..")
@@ -1266,8 +1267,8 @@ subroutine IS_dynamics_post_data(time_step, Time, CS, ISS, G)
   real, dimension(SZDIB_(G),SZDJB_(G))  :: taud_x, taud_y, taud  ! area-averaged driving stress [R L2 T-2 ~> Pa]
   real, dimension(SZDI_(G),SZDJ_(G))  :: ice_visc ! area-averaged vertically integrated ice viscosity
                                                   !! [R L2 Z T-1 ~> Pa s m]
-  real, dimension(SZDI_(G),SZDJ_(G))  :: basal_tr ! area-averaged taub_beta field related to basal traction,
-                                                  !! [R L T-1 ~> Pa s m-1]
+  real, dimension(SZDI_(G),SZDJ_(G))  :: basal_tr ! taub_beta, the basal traction coefficient taub/|u|,
+                                                  !! [R Z T-1 ~> Pa s m-1]
   real, dimension(SZDI_(G),SZDJ_(G))   :: surf_slope ! the surface slope of the ice shelf/sheet [nondim]
   real, dimension(SZDIB_(G),SZDJB_(G)) :: ice_speed ! ice sheet flow speed [L T-1 ~> m s-1]
 
@@ -1344,7 +1345,7 @@ subroutine ice_visc_diag(CS,G,ice_visc)
   type(ocean_grid_type),  intent(in) :: G  !< The grid structure used by the ice shelf.
   real, dimension(SZDI_(G),SZDJ_(G)), intent(out)  :: ice_visc !< area-averaged vertically integrated ice viscosity
                                                                !! [R L2 Z T-1 ~> Pa s m]
-  integer :: i,j
+  integer :: i, j
 
   ice_visc(:,:)=0.0
   if (CS%visc_qps==4) then
@@ -1644,7 +1645,7 @@ subroutine ice_shelf_solve_outer(CS, ISS, G, US, u_shlf, v_shlf, taudx, taudy, i
   logical :: converged ! Indicates nonlinear convergence
   logical :: calc_Au_for_convergence ! Used for convergence criteria than need a CG_action
   character(len=160) :: mesg  ! The text of an error message
-  integer :: conv_flag, i, j, k,l, iter, nodefloat
+  integer :: conv_flag, i, j, k, l, iter, nodefloat
   integer :: Isdq, Iedq, Jsdq, Jedq, isd, ied, jsd, jed
   integer :: Iscq, Iecq, Jscq, Jecq, isc, iec, jsc, jec
   real    :: err_max, err_tempu, err_tempv, err_init ! Errors in [R L3 Z T-2 ~> kg m s-2] or [L T-1 ~> m s-1]
@@ -3448,7 +3449,7 @@ subroutine calve_to_mask(G, h_shelf, area_shelf_h, hmask, calve_mask)
   real, dimension(SZDI_(G),SZDJ_(G)), intent(in)    :: calve_mask !< A mask that indicates where the ice
                                                              !! shelf can exist, and where it will calve.
 
-  integer                        :: i,j
+  integer :: i, j
 
   do j=G%jsc,G%jec ; do i=G%isc,G%iec
     if ((calve_mask(i,j) == 0.0) .and. (hmask(i,j) /= 0.0)) then
@@ -3754,7 +3755,7 @@ subroutine CG_action(CS, uret, vret, u_shlf, v_shlf, Phi, Phisub, umask, vmask, 
   real :: coef_prefactor_e  ! Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
   real :: eps_vel2_e     ! Velocity regularization squared for current element [L2 T-2 ~> m2 s-2]
   real :: min_trac_e     ! min_basal_traction * areaT for current element [R L2 Z T-1 ~> kg s-1]
-  real :: fB_e           ! Pre-computed Coulomb fB for element; 0 for Weertman [(T L-1)^CF_PostPeak]
+  real :: fB_e           ! Pre-computed Coulomb fB for element; 0 for Weertman [(s m-1)^CF_PostPeak]
   real :: jac_wt  ! Per-quadrature-point metric correction |J_q|/areaT [nondim]
   integer :: iq, jq, iphi, jphi, i, j, ilq, jlq, Itgt, Jtgt, qp, qpv
   logical :: visc_qp4
@@ -3969,7 +3970,7 @@ subroutine CG_action_subgrid_basal(CS, G, US, Phisub, H, U_curr, V_curr, U_delta
   real,                   intent(in) :: dens_ratio !< Ice density / water density [nondim]
   integer,                intent(in) :: i_elem  !< Tracer-grid i-index of the element
   integer,                intent(in) :: j_elem  !< Tracer-grid j-index of the element
-  real,                   intent(in) :: fB_e    !< Element Coulomb parameter fB; 0 for Weertman [(T L-1)^CF_PostPeak]
+  real,                   intent(in) :: fB_e    !< Element Coulomb parameter fB; 0 for Weertman [(s m-1)^CF_PostPeak]
   logical,                intent(in) :: use_newton !< If true, include Newton basal drag correction
   real, dimension(2,2),   intent(out) :: Ucontr !< Nodal u-contributions with friction applied [R L3 Z T-2 ~> kg m s-2]
   real, dimension(2,2),   intent(out) :: Vcontr !< Nodal v-contributions with friction applied [R L3 Z T-2 ~> kg m s-2]
@@ -4082,7 +4083,7 @@ subroutine compute_basal_coef(unorm2_qp, coef_prefactor, min_trac_area, fB_e, &
   real,    intent(in)  :: unorm2_qp      !< Regularized |u^k|^2 > 0 at quadrature point [L2 T-2 ~> m2 s-2]
   real,    intent(in)  :: coef_prefactor !< Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
   real,    intent(in)  :: min_trac_area  !< Pre-computed min_basal_traction * areaT floor [R L2 Z T-1 ~> kg s-1]
-  real,    intent(in)  :: fB_e           !< Element-level Coulomb fB; 0 for Weertman [(T L-1)^CF_PostPeak]
+  real,    intent(in)  :: fB_e           !< Element-level Coulomb fB; 0 for Weertman [(s m-1)^CF_PostPeak]
   real,    intent(in)  :: n_basal_fric   !< Friction sliding exponent m [nondim]
   logical, intent(in)  :: CoulombFriction !< True if using Coulomb friction
   real,    intent(in)  :: CF_PostPeak    !< Coulomb post-peak exponent q [nondim]
@@ -4226,7 +4227,7 @@ subroutine matrix_diagonal(CS, G, US, float_cond, H_node, ice_visc, u_curr, v_cu
   real :: coef_prefactor_e  ! Pre-computed area * C_basal_friction * L_T_to_m_s [R L2 Z T-1 ~> kg s-1]
   real :: eps_vel2_e     ! Velocity regularization squared for current element [L2 T-2 ~> m2 s-2]
   real :: min_trac_e     ! min_basal_traction * areaT for current element [R L2 Z T-1 ~> kg s-1]
-  real :: fB_e           ! Pre-computed Coulomb fB for element; 0 for Weertman [(T L-1)^CF_PostPeak]
+  real :: fB_e           ! Pre-computed Coulomb fB for element; 0 for Weertman [(s m-1)^CF_PostPeak]
   real, dimension(2)   :: xquad
   real, dimension(2,2) :: Hcell, u_diag_sub, v_diag_sub  ! Subgrid diagonal contributions [R L2 Z T-1 ~> kg s-1]
   real, dimension(2,2,4) :: u_diag_qp, v_diag_qp
@@ -4422,7 +4423,7 @@ subroutine CG_diagonal_subgrid_basal(CS, G, US, Phisub, H_node, U_curr, V_curr, 
   real,                   intent(in) :: dens_ratio !< Ice density / water density [nondim]
   integer,                intent(in) :: i_elem  !< Tracer-grid i-index of the element
   integer,                intent(in) :: j_elem  !< Tracer-grid j-index of the element
-  real,                   intent(in) :: fB_e    !< Element Coulomb parameter fB; 0 for Weertman [(T L-1)^CF_PostPeak]
+  real,                   intent(in) :: fB_e    !< Element Coulomb parameter fB; 0 for Weertman [(s m-1)^CF_PostPeak]
   real, dimension(2,2),   intent(out) :: u_diag !< Nodal u-diagonal entries [R L2 Z T-1 ~> kg s-1]
   real, dimension(2,2),   intent(out) :: v_diag !< Nodal v-diagonal entries [R L2 Z T-1 ~> kg s-1]
   real,                   intent(in)  :: dxCv_S !< The cell width at the southern (v-point) edge [L ~> m]
@@ -4532,7 +4533,7 @@ subroutine IS_dynamics_post_data_2(CS, ISS, G)
   real, dimension(SZDI_(G),SZDJ_(G),3) :: dev_stress ! deviatoric stress components xx,yy, and xy [R L Z T-2 ~> Pa]
   real, dimension(SZDI_(G),SZDJ_(G),2) :: p_dev_stress ! horizontal principal deviatoric stress [R L Z T-2 ~> Pa]
   real, dimension(SZDI_(G),SZDJ_(G))  :: ice_visc ! area-averaged ice viscosity [R L2 T-1 ~> Pa s]
-  real :: p1,p2 ! Used to calculate strain-rate principal components [T-1 ~> s-1]
+  real :: p1, p2 ! Used to calculate strain-rate principal components [T-1 ~> s-1]
   integer :: i, j
 
   !Allocate the gradient basis functions for 1 cell-centered quadrature point per cell
@@ -4829,40 +4830,34 @@ subroutine calc_shelf_basal_prefactors(CS, ISS, G, US)
 
 end subroutine calc_shelf_basal_prefactors
 
-!> Compute area-averaged basal shear stress [R L T-1 ~> Pa s m-1] and return it in basal_tr.
-!! Uses CS%u_shelf and CS%v_shelf for velocities and G%US for unit conversions.
+!> Compute basal traction coefficient beta = taub/|u| [R Z T-1 ~> Pa s m-1]
+!! Basal shear stress = beta * ice speed
 subroutine calc_shelf_taub(CS, ISS, G, basal_tr)
   type(ice_shelf_dyn_CS), intent(in)  :: CS  !< Ice shelf dynamics control structure
   type(ice_shelf_state),  intent(in)  :: ISS !< A structure with elements that describe
                                              !! the ice-shelf state
   type(ocean_grid_type),  intent(in)  :: G   !< The grid structure used by the ice shelf.
   real, dimension(SZDI_(G),SZDJ_(G)), &
-                          intent(out) :: basal_tr !< Area-averaged basal traction [R L T-1 ~> Pa s m-1]
+                          intent(out) :: basal_tr !< Basal traction coefficient, taub/|u|
+                                             !! [R Z T-1 ~> Pa s m-1]
 
   integer :: i, j
   real :: umid, vmid    ! Cell-center velocity averages [L T-1 ~> m s-1]
   real :: eps_min       ! Minimal strain rate [T-1 ~> s-1]
   real :: unorm         ! Velocity magnitude in mks units [m s-1]
-  real :: alpha         ! Coulomb coefficient [nondim]
   real :: Hf            ! Floatation thickness for Coulomb friction [Z ~> m]
   real :: fN            ! Effective pressure for Coulomb friction [R Z L T-2 ~> Pa]
-  real :: fB            ! Coulomb friction factor [(T L-1)^CS%CF_PostPeak]
+  real :: fB            ! Coulomb friction factor [(s m-1)^CS%CF_PostPeak]
   real :: fBuq          ! fB * unorm^CF_PostPeak [nondim]
   real :: unorm_code2   ! Squared velocity magnitude in code units [L2 T-2 ~> m2 s-2]
   real :: basal_trac    ! Area-integrated traction coefficient [R Z L2 T-1 ~> kg s-1]
 
   eps_min = CS%eps_glen_min
 
-  if (CS%CoulombFriction) then
-    if (CS%CF_PostPeak /= 1.0) then
-      alpha = CS%alpha_coulomb
-    else
-      alpha = 1.0
-    endif
-  endif
-
   basal_tr(:,:) = 0.0
 
+  ! For simplicity, the diagnostic is calculated here at cell center, so it will differ slightly from
+  ! the solver if the solver uses 4 quadrature points.
   do j=G%jsc,G%jec ; do i=G%isc,G%iec
     if ((ISS%hmask(i,j) == 1) .OR. (ISS%hmask(i,j) == 3)) then
       umid = ((CS%u_shelf(I,J) + CS%u_shelf(I-1,J-1)) + (CS%u_shelf(I,J-1) + CS%u_shelf(I-1,J))) * 0.25
@@ -4870,19 +4865,21 @@ subroutine calc_shelf_taub(CS, ISS, G, basal_tr)
       unorm_code2 = ((umid**2) + (vmid**2)) + (eps_min**2 * ((G%dxT(i,j)**2) + (G%dyT(i,j)**2)))
       unorm = G%US%L_T_to_m_s * sqrt(unorm_code2)
 
-      !Coulomb friction (Schoof 2005, Gagliardini et al 2007)
+      ! Recalculate fB and areaT * C_basal_friction here because CS%fB_elem and CS%coef_prefactor are not
+      ! updated before the first solve or on steps that skip the velocity update.
       if (CS%CoulombFriction) then
+        !(Schoof 2005, Gagliardini et al 2007)
         !Effective pressure
         Hf = max(CS%rhow_rhoi * CS%bed_elev(i,j), 0.0)
         fN = max((G%US%L_to_Z*(CS%density_ice * CS%g_Earth) * (max(ISS%h_shelf(i,j),CS%min_h_shelf) - Hf)), CS%CF_MinN)
-        fB = alpha * (CS%C_basal_friction(i,j) / (CS%CF_Max * fN))**(CS%coulomb_pp_n)
+        fB = CS%alpha_coulomb * (CS%C_basal_friction(i,j) / (CS%CF_Max * fN))**(CS%coulomb_pp_n)
         fBuq = fB * unorm**CS%CF_PostPeak
         basal_trac = ((G%areaT(i,j) * CS%C_basal_friction(i,j)) * &
             (unorm**(CS%n_basal_fric-1.0) / (1.0 + fBuq)**(CS%n_basal_fric))) * &
             G%US%L_T_to_m_s   ! Restore the scaling after the fractional power law.
       else
         !linear (CS%n_basal_fric = 1) or "Weertman"/power-law (CS%n_basal_fric /= 1)
-        basal_trac = ((G%areaT(i,j) * CS%C_basal_friction(i,j)) * (unorm**(CS%n_basal_fric-1))) * &
+        basal_trac = ((G%areaT(i,j) * CS%C_basal_friction(i,j)) * (unorm**(CS%n_basal_fric-1.0))) * &
                      G%US%L_T_to_m_s ! Rescale after the fractional power law.
       endif
 
@@ -4969,7 +4966,7 @@ subroutine change_in_draft(CS, G, h_shelf0, h_shelf1, ddraft)
                           intent(in)    :: h_shelf1 !< the current thickness of the ice shelf [Z ~> m].
   real, dimension(SZDI_(G),SZDJ_(G)), &
                           intent(inout)    :: ddraft !< the change in shelf draft thickness
-  real :: b0,b1
+  real :: b0, b1
   integer :: i, j, isc, iec, jsc, jec
   real    :: OD
 
@@ -5034,7 +5031,7 @@ subroutine bilinear_shape_functions (X, Y, Phi, area)
 ! ... will all cells have the same shape and dimension?
 
   real, dimension(4) :: xquad, yquad ! [nondim]
-  real :: a,b,c,d  ! Various lengths [L ~> m]
+  real :: a, b, c, d ! Various lengths [L ~> m]
   real :: xexp, yexp ! [nondim]
   integer :: node, qpoint, xnode, ynode
 
