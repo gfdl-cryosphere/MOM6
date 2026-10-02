@@ -310,7 +310,7 @@ subroutine shelf_calc_flux(sfc_state_in, fluxes_in, Time, time_step_in, CS)
     dh_bdott, & !< Basal melt/accumulation over a time step, used for diagnostics [Z ~> m]
     dh_adott, & !< Surface melt/accumulation over a time step, used for diagnostics [Z ~> m]
     mass_start, &  !< Mass per unit area of ice sheet at start of time step [R Z ~> kg m-2]
-    mass_ba !< Mass before advection [R Z ~> kg m-2]
+    mass_ba, & !< Mass before advection [R Z ~> kg m-2]
     frazil_used !< The frazil heat that is actually converted into refreezing onto the base
                 !! of the ice shelf during this time step [Q R Z ~> J m-2]
   real, dimension(SZDI_(CS%grid),SZDJ_(CS%grid)) :: &
