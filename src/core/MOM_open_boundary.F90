@@ -473,6 +473,8 @@ type, public :: ocean_OBC_type
   type(group_pass_type) :: pass_oblique  !< Structure for group halo pass
   logical :: exterior_OBC_bug   !< If true, use incorrect form of tracers exterior to OBCs.
   logical :: hor_index_bug      !< If true, recover set of a horizontal indexing bugs in the OBC code.
+  logical :: segment_end_dz_bug !< If true, use the wrong total depth at the last vorticity point of
+                                !! each OBC segment when adjusting segment data to fit the bathymetry.
   logical :: reservoir_init_bug !< If true, set the OBC tracer reservoirs at the startup of a new
                                 !! run from the interior tracer concentrations regardless of
                                 !! properties that may be explicitly specified for the reservoir
@@ -739,6 +741,12 @@ subroutine open_boundary_config(G, US, param_file, OBC)
   call get_param(param_file, mdl, "OBC_HOR_INDEXING_BUG", OBC%hor_index_bug, &
                  "If true, recover set of a horizontal indexing bugs in the OBC code.", &
                  default=enable_bugs)
+  call get_param(param_file, mdl, "OBC_SEGMENT_END_DZ_BUG", OBC%segment_end_dz_bug, &
+                 "If true, recover a bug that uses the average of the total depths inside and "//&
+                 "beyond the end of an OBC segment at the last vorticity point of the segment, "//&
+                 "rather than the depth inside the segment, when fitting OBC data at vorticity "//&
+                 "points to the bathymetry.  This is only used if OBC_HOR_INDEXING_BUG is false.", &
+                 default=enable_bugs, do_not_log=OBC%hor_index_bug)
   call get_param(param_file, mdl, "OBC_RESERVOIR_INIT_BUG", OBC%reservoir_init_bug, &
                  "If true, set the OBC tracer reservoirs at the startup of a new run from the "//&
                  "interior tracer concentrations regardless of properties that may be explicitly "//&
@@ -4402,13 +4410,13 @@ subroutine read_OBC_field_data(G, GV, US, OBC, segment, m, Time)
   real, dimension(:,:,:), allocatable, target :: tmp_buffer ! A buffer for input data [various units]
   real :: dz_stack(SZK_(GV)) ! Distance between the interfaces at corner points [Z ~> m]
   integer :: ni_seg, nj_seg  ! number of src gridpoints along the segments
-  integer :: ni_buf, nj_buf  ! Number of filled values in tmp_buffer
   integer :: i_seg_offset, j_seg_offset, bug_offset
   real :: net_dz_src  ! Total vertical extent of the incoming flow in the source field [Z ~> m]
   real :: net_dz_int  ! Total vertical extent of the incoming flow in the model [Z ~> m]
   real :: scl_fac     ! A scaling factor to compensate for differences in total thicknesses [nondim]
   integer :: turns    ! Number of index quarter turns
   logical :: flip_buffer ! If true, the input buffer needs to be transposed
+  logical :: at_node  ! Flag passed to adjustEtaToFitBathymetry determining if point is at OBC node or faces
 
   if (segment%field(m)%required .and. (.not. allocated(segment%field(m)%buffer_dst))) &
     call MOM_error(FATAL, 'buffer_dst not allocated')
@@ -4461,16 +4469,10 @@ subroutine read_OBC_field_data(G, GV, US, OBC, segment, m, Time)
   ! NOTE: Rotation of face-points require that we skip the final value when not in brushcutter mode.
   if (turns /= 0) then
     flip_buffer = ((turns==1) .or. (turns==3))
-    if (OBC%brushcutter_mode .or. (.not.flip_buffer)) then
+    if (OBC%brushcutter_mode .or. (.not.segment%field(m)%on_face)) then
       call rotate_array(tmp_buffer_in, turns, tmp_buffer)
-    elseif (flip_buffer .and. segment%is_E_or_W .and. segment%field(m)%on_face) then
-      nj_buf = size(tmp_buffer, 2) - 1
-      call rotate_array(tmp_buffer_in(:nj_buf,:,:), turns, tmp_buffer(:,:nj_buf,:))
-    elseif (flip_buffer .and. segment%is_N_or_S .and. segment%field(m)%on_face) then
-      ni_buf = size(tmp_buffer, 1) - 1
-      call rotate_array(tmp_buffer_in(:,:ni_buf,:), turns, tmp_buffer(:ni_buf,:,:))
     else
-      call rotate_array(tmp_buffer_in, turns, tmp_buffer)
+      call rotate_face_buffer(tmp_buffer_in, turns, flip_buffer, segment%is_E_or_W, tmp_buffer)
     endif
 
     if (((segment%field(m)%name == 'U') .and. ((turns==1).or.(turns==2))) .or. &
@@ -4539,14 +4541,10 @@ subroutine read_OBC_field_data(G, GV, US, OBC, segment, m, Time)
 
     if (turns /= 0) then
       flip_buffer = ((turns==1) .or. (turns==3))
-      if (flip_buffer .and. segment%is_E_or_W .and. segment%field(m)%on_face) then
-        nj_buf = size(tmp_buffer, 2) - 1
-        call rotate_array(tmp_buffer_in(:nj_buf,:,:), turns, tmp_buffer(:,:nj_buf,:))
-      elseif (flip_buffer .and. segment%is_N_or_S .and. segment%field(m)%on_face) then
-        ni_buf = size(tmp_buffer, 1) - 1
-        call rotate_array(tmp_buffer_in(:,:ni_buf,:), turns, tmp_buffer(:ni_buf,:,:))
-      else
+      if (OBC%brushcutter_mode .or. (.not.segment%field(m)%on_face)) then
         call rotate_array(tmp_buffer_in, turns, tmp_buffer)
+      else
+        call rotate_face_buffer(tmp_buffer_in, turns, flip_buffer, segment%is_E_or_W, tmp_buffer)
       endif
     endif ! End of rotation
 
@@ -4589,12 +4587,9 @@ subroutine read_OBC_field_data(G, GV, US, OBC, segment, m, Time)
       endif
     endif
 
-    if ((.not.segment%field(m)%on_face) .and. (.not.OBC%hor_index_bug)) then
-      ! This point is at the OBC vorticity point nodes, rather than the OBC velocity point faces.
-      call adjustSegmentEtaToFitBathymetry(G, GV, US, segment, m, at_node=.true.)
-    else
-      call adjustSegmentEtaToFitBathymetry(G, GV, US, segment, m, at_node=.false.)
-    endif
+    at_node = (.not.segment%field(m)%on_face) .and. (.not.OBC%hor_index_bug)
+    call adjustSegmentEtaToFitBathymetry(G, GV, US, segment, m, at_node=at_node, &
+                                     end_dz_bug=(OBC%segment_end_dz_bug .and. at_node))
 
     if (segment%is_E_or_W) then
       I = IsdB
@@ -6508,13 +6503,15 @@ end subroutine remap_OBC_fields
 !! is dilated (expanded) to fill the void.
 !!   @remark{There is a (hard-wired) "tolerance" parameter such that the
 !! criteria for adjustment must equal or exceed 10cm.}
-subroutine adjustSegmentEtaToFitBathymetry(G, GV, US, segment, fld, at_node)
+subroutine adjustSegmentEtaToFitBathymetry(G, GV, US, segment, fld, at_node, end_dz_bug)
   type(ocean_grid_type),   intent(in)    :: G   !< The ocean's grid structure
   type(verticalGrid_type), intent(in)    :: GV  !< The ocean's vertical grid structure
   type(unit_scale_type),   intent(in)    :: US  !< A dimensional unit scaling type
   type(OBC_segment_type),  intent(inout) :: segment !< OBC segment
   integer,                 intent(in)    :: fld  !< field index to adjust thickness
   logical,                 intent(in)    :: at_node !< True this point is at the OBC nodes rather than the faces
+  logical,                 intent(in)    :: end_dz_bug !< If true, use the wrong total depth at the
+                                                 !! last node of the segment
 
   integer :: i, j, k, is, ie, js, je, nz, contractions, dilations
   real, allocatable, dimension(:,:,:) :: eta ! Segment source data interface heights [Z ~> m]
@@ -6556,7 +6553,11 @@ subroutine adjustSegmentEtaToFitBathymetry(G, GV, US, segment, fld, at_node)
       ! Do not extrapolate past the end of a global segment.
       ! ### For a concave corner between segments, perhaps we should do something more sophisticated.
       if (Js == segment%Js_obc) dz_tot(I,Js) = segment%dZtot(I,js+1)
-      if (Je == segment%Js_obc) dz_tot(I,Je) = segment%dZtot(I,je)
+      if (end_dz_bug) then
+        if (Je == segment%Js_obc) dz_tot(I,Je) = segment%dZtot(I,je)
+      else
+        if (Je == segment%Je_obc) dz_tot(I,Je) = segment%dZtot(I,je)
+      endif
     else
       J = Js
       do I=Is,Ie
@@ -6564,7 +6565,11 @@ subroutine adjustSegmentEtaToFitBathymetry(G, GV, US, segment, fld, at_node)
       enddo
       ! Do not extrapolate past the end of a global segment.
       if (Is == segment%Is_obc) dz_tot(Is,J) = segment%dZtot(is+1,J)
-      if (Ie == segment%Is_obc) dz_tot(Ie,J) = segment%dZtot(ie,J)
+      if (end_dz_bug) then
+        if (Ie == segment%Is_obc) dz_tot(Ie,J) = segment%dZtot(ie,J)
+      else
+        if (Ie == segment%Ie_obc) dz_tot(Ie,J) = segment%dZtot(ie,J)
+      endif
     endif
   else
     do j=js,je ; do i=is,ie
@@ -6637,6 +6642,35 @@ subroutine adjustSegmentEtaToFitBathymetry(G, GV, US, segment, fld, at_node)
   deallocate(eta, dz_tot)
 
 end subroutine adjustSegmentEtaToFitBathymetry
+
+!> Rotate a buffer of face-point OBC segment data that was read on the unrotated grid.  Face data
+!! fill only the first n-1 of the n entries along the segment, so only those entries are rotated.
+!! Rotating the full buffer would reverse the unused final entry into the first position whenever
+!! the rotation reverses the along-segment direction.
+subroutine rotate_face_buffer(buf_in, turns, flip_buffer, is_E_or_W, buf)
+  real, dimension(:,:,:), intent(in)    :: buf_in      !< Buffer on the unrotated grid [various]
+  integer,                intent(in)    :: turns       !< Number of quarter turns, from 1 to 3
+  logical,                intent(in)    :: flip_buffer !< True if the i and j axes are exchanged
+  logical,                intent(in)    :: is_E_or_W   !< True if the rotated segment is E or W
+  real, dimension(:,:,:), intent(inout) :: buf         !< Buffer on the rotated grid [various]
+  integer :: n_buf  ! The number of filled face values along the segment
+
+  if (is_E_or_W) then
+    n_buf = size(buf, 2) - 1
+    if (flip_buffer) then
+      call rotate_array(buf_in(:n_buf,:,:), turns, buf(:,:n_buf,:))
+    else
+      call rotate_array(buf_in(:,:n_buf,:), turns, buf(:,:n_buf,:))
+    endif
+  else
+    n_buf = size(buf, 1) - 1
+    if (flip_buffer) then
+      call rotate_array(buf_in(:,:n_buf,:), turns, buf(:n_buf,:,:))
+    else
+      call rotate_array(buf_in(:n_buf,:,:), turns, buf(:n_buf,:,:))
+    endif
+  endif
+end subroutine rotate_face_buffer
 
 !> This is more of a rotate initialization than an actual rotate
 subroutine rotate_OBC_config(OBC_in, G_in, OBC, G, turns)
@@ -6743,6 +6777,7 @@ subroutine rotate_OBC_config(OBC_in, G_in, OBC, G, turns)
   OBC%remappingScheme = OBC_in%remappingScheme
   OBC%exterior_OBC_bug = OBC_in%exterior_OBC_bug
   OBC%hor_index_bug = OBC_in%hor_index_bug
+  OBC%segment_end_dz_bug = OBC_in%segment_end_dz_bug
   OBC%ignore_dt_obc_bgc = OBC_in%ignore_dt_obc_bgc
   OBC%tracer_dz_bug = OBC_in%tracer_dz_bug
   OBC%n_tide_constituents = OBC_in%n_tide_constituents
@@ -6966,9 +7001,10 @@ end function rotated_field_name
 
 !> Allocate an array of data for a field on a segment based on the size of a potentially rotated source array
 subroutine allocate_rotated_seg_data(src_array, HI_in, tgt_array, segment)
-  real, dimension(:,:,:), intent(in) :: src_array !< The segment data on the unrotated source grid
+  real, dimension(:,:,:), intent(in) :: src_array !< The segment data on the unrotated source grid [arbitrary]
   type(hor_index_type),   intent(in) :: HI_in !< Horizontal indices on the source grid
-  real, dimension(:,:,:), allocatable, intent(inout) :: tgt_array !< The segment data that is being allocated
+  real, dimension(:,:,:), allocatable, &
+                          intent(inout) :: tgt_array !< The segment data that is being allocated [arbitrary]
   type(OBC_segment_type), intent(inout) :: segment !< OBC segment on the target grid
 
   ! Local variables
@@ -7291,7 +7327,7 @@ subroutine chksum_OBC_segment_data(segment, GV, US, nk, nseg_out)
   !> Write out the values in a 3-d segment data array
   subroutine write_3d_array_vals(name, Array, seg_dir, nkp, unscale)
     character(len=*),       intent(in) :: name    !< The name of the variable
-    real, dimension(:,:,:), intent(in) :: Array   !< The 3-d array to write
+    real, dimension(:,:,:), intent(in) :: Array   !< The 3-d array to write in arbitrary units [A ~> a]
     integer,                intent(in) :: seg_dir !< The direction of the segment
     integer,                intent(in) :: nkp     !< The number of layers to print
     real,         optional, intent(in) :: unscale !< A factor that undoes the scaling of the array [a A-1 ~> 1]
